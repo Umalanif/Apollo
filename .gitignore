@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+out/
+
+# Environment files (secrets, credentials)
+.env
+.env.*
+.env.local
+.env.development
+.env.production
+*.env
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Editor directories and files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Generated/api response files (may contain sensitive data)
+fetch.json
+response.json
+responseheaders.json
+
+# Cache and temporary files
+.cache/
+tmp/
+temp/
+*.tmp
+
+# User-specific files
+*.local
+config.local.*
+
+# Databases (user-specific, contain parsed data)
+*.db
+*.sqlite
+*.sqlite3
+*.mdb
+*.accdb
+
+# Parsing results (generated data, not part of source)
+data/
+results/
+output/
+*.json       # may contain parsed results
+*.csv        # may contain parsed results
+*.xml        # may contain parsed results

@@ -1,0 +1,51 @@
+{
+  "requestsFinished": 0,
+  "requestsFailed": 1,
+  "requestsRetries": 1,
+  "requestsFailedPerMinute": 0,
+  "requestsFinishedPerMinute": 0,
+  "requestMinDurationMillis": null,
+  "requestMaxDurationMillis": 0,
+  "requestTotalFailedDurationMillis": 70860,
+  "requestTotalFinishedDurationMillis": 0,
+  "crawlerStartedAt": "2026-04-11T13:51:24.595Z",
+  "crawlerFinishedAt": "2026-04-11T13:54:59.893Z",
+  "statsPersistedAt": "2026-04-11T13:54:59.893Z",
+  "crawlerRuntimeMillis": 215456,
+  "crawlerLastStartTimestamp": 1775915484437,
+  "requestRetryHistogram": [
+    null,
+    null,
+    1
+  ],
+  "statsId": 0,
+  "requestAvgFailedDurationMillis": 70860,
+  "requestAvgFinishedDurationMillis": null,
+  "requestTotalDurationMillis": 70860,
+  "requestsTotal": 1,
+  "requestsWithStatusCode": {
+    "200": 3
+  },
+  "errors": {
+    "V:\\Scraping\\Apollo\\node_modules\\@apify\\timeout\\cjs\\index.cjs:64:68": {
+      "missing error code": {
+        "Error": {
+          "requestHandler timed out after 60 seconds.": {
+            "count": 1
+          }
+        }
+      }
+    }
+  },
+  "retryErrors": {
+    "V:\\Scraping\\Apollo\\node_modules\\@apify\\timeout\\cjs\\index.cjs:64:68": {
+      "missing error code": {
+        "Error": {
+          "requestHandler timed out after 60 seconds.": {
+            "count": 2
+          }
+        }
+      }
+    }
+  }
+}
