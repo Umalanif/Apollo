@@ -18,3 +18,14 @@ export class ChallengeBypassSignal extends Error {
     this.url = url;
   }
 }
+
+/**
+ * Thrown when authentication fails after all retry attempts.
+ * The worker should stop and log FATAL: AUTH_FAILED.
+ */
+export class AuthenticationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthenticationError';
+  }
+}

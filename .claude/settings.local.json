@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(npm run:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Read(//d V:/Scraping/**)",
+      "Bash(grep -r \"LaunchContext\" node_modules/playwright/types/*.d.ts)",
+      "Bash(cd /d V:\\\\Scraping\\\\Apollo)",
+      "Bash(node -e \"const {chromium} = require\\('playwright'\\); console.log\\(Object.keys\\(chromium\\)\\); console.log\\(Object.getOwnPropertyNames\\(Object.getPrototypeOf\\(chromium\\)\\).slice\\(0,20\\)\\)\")",
+      "Bash(sqlite3 /v/Scraping/Apollo/prisma/dev.db \"SELECT COUNT\\(*\\) FROM Lead;\")",
+      "Bash(node:*)"
     ]
   }
 }

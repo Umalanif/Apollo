@@ -26,7 +26,7 @@ import { logger } from './logger';
 import { createCrawler } from './crawler';
 import { ChallengeDetection } from './challenge-detector';
 import { solveRecaptcha } from './captcha-solver';
-import { ChallengeBypassSignal } from './errors';
+import { ChallengeBypassSignal, AuthenticationError } from './errors';
 import { scrapeLeadsFromPage } from './leads-scraper';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -211,6 +211,13 @@ async function run(): Promise<void> {
         break;
 
       } catch (err) {
+        // AuthenticationError is fatal — do not rotate proxy, stop immediately
+        if (err instanceof AuthenticationError) {
+          logger.error({ jobId: data.jobId, err: err.message }, 'FATAL: AUTH_FAILED');
+          post({ type: 'error', payload: { message: err.message } });
+          return;
+        }
+
         if (err instanceof ChallengeBypassSignal) {
           const challengeType = err.challengeType;
           const url = err.url;

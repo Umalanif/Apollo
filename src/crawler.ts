@@ -14,16 +14,29 @@
 import { PlaywrightCrawler } from 'crawlee';
 import { ProxyConfiguration } from '@crawlee/core';
 import type { Page } from 'playwright';
+import * as fs from 'fs';
+import * as path from 'path';
 import { getEnv } from './env/schema';
 import { logger } from './logger';
 import { detectChallenge, ChallengeDetection } from './challenge-detector';
 import { ChallengeBypassSignal } from './errors';
+import { AuthManager } from './services/auth.service';
 
 // ── Proxy URL builder ─────────────────────────────────────────────────────────
 
 export function buildProxyUrl(port: number = 10000): string {
   const { PROXY_HOST, PROXY_USERNAME, PROXY_PASSWORD } = getEnv();
   return `http://${PROXY_USERNAME}:${PROXY_PASSWORD}@${PROXY_HOST}:${port}`;
+}
+
+/** Proxy components for explicit Playwright configuration */
+export function getProxyComponents(port: number = 10000) {
+  const { PROXY_HOST, PROXY_USERNAME, PROXY_PASSWORD } = getEnv();
+  return {
+    server: `http://${PROXY_HOST}:${port}`,
+    username: PROXY_USERNAME,
+    password: PROXY_PASSWORD,
+  };
 }
 
 
@@ -57,7 +70,8 @@ async function warmUpAndNavigateToHash(
   logger.debug({ jobId, title }, 'Warm-up: page title received');
 
   if (title.toLowerCase().includes('log in')) {
-    logger.warn({ jobId, title }, 'Log In page detected after warm-up — TODO: Phase 16.2 - Trigger Auto-Login Flow here');
+    logger.warn({ jobId, title }, 'Log In page detected — triggering auto-login');
+    await AuthManager.ensureAuthenticated(page, jobId);
   }
 
   // Title should contain "Home" or "Dashboard" for a valid authenticated session
@@ -190,6 +204,28 @@ async function preNavigationHook(
   // ── Proxy authentication header injection ─────────────────────────────────
   // The proxy requires Basic auth — inject into headers on every request
   // This is handled by Playwright's proxy configuration, no extra work needed.
+
+  // ── Session cookie injection from storage/auth.json ───────────────────────
+  // If a valid auth.json exists, load its cookies into the context so the
+  // page navigation uses the existing authenticated session.
+  const authFilePath = path.resolve('storage/auth.json');
+  if (fs.existsSync(authFilePath)) {
+    try {
+      const authState = JSON.parse(fs.readFileSync(authFilePath, 'utf-8'));
+      if (authState.cookies && Array.isArray(authState.cookies)) {
+        // Filter to Apollo-relevant cookies and add them to the context
+        const apolloCookies = authState.cookies.filter(
+          (c: { domain?: string }) => c.domain && c.domain.includes('apollo.io'),
+        );
+        if (apolloCookies.length > 0) {
+          await page.context().addCookies(apolloCookies);
+          logger.debug({ cookieCount: apolloCookies.length }, 'Apollo session cookies loaded');
+        }
+      }
+    } catch (err) {
+      logger.debug({ err }, 'Failed to load auth.json cookies (non-fatal)');
+    }
+  }
 }
 
 // ── Resource blocker ───────────────────────────────────────────────────────────
@@ -250,10 +286,10 @@ export interface CrawlerDeps {
 
 export async function createCrawler(deps: CrawlerDeps): Promise<PlaywrightCrawler> {
   const { jobId, proxyPort = 10000, onChallengeDetected, onPageReady } = deps;
-  const proxyUrl = buildProxyUrl(proxyPort);
+  const { PROXY_HOST } = getEnv();
 
   logger.info(
-    { jobId, proxyPort, proxyHost: proxyUrl.replace(/:[^:@]+@/, ':***@') },
+    { jobId, proxyPort, proxyHost: `http://${PROXY_HOST}:${proxyPort}` },
     'Creating PlaywrightCrawler',
   );
 
@@ -262,8 +298,8 @@ export async function createCrawler(deps: CrawlerDeps): Promise<PlaywrightCrawle
     maxConcurrency: 1,
     maxRequestRetries: 2,
 
-    // ── Proxy ───────────────────────────────────────────────────────────────
-    proxyConfiguration: new ProxyConfiguration({ proxyUrls: [proxyUrl] }),
+    proxyConfiguration: new ProxyConfiguration({ proxyUrls: [buildProxyUrl(proxyPort)] }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     launchContext: {
       // Playwright launch options — add automation-controlled flag
       launchOptions: {
@@ -276,7 +312,10 @@ export async function createCrawler(deps: CrawlerDeps): Promise<PlaywrightCrawle
           '--disable-gpu',
         ],
       },
-    },
+      // Persistent context — browser stores cookies, localStorage, IndexedDB in real time
+      // like a normal user profile, eliminating storageState write-order issues.
+      userDataDir: './storage/browser_profile',
+    } as any,
 
     // ── Navigation hooks ────────────────────────────────────────────────────
     preNavigationHooks: [preNavigationHook],
