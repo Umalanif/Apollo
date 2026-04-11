@@ -18,14 +18,3 @@ export class ChallengeBypassSignal extends Error {
     this.url = url;
   }
 }
-
-/**
- * Thrown when the Apollo session cookie is invalid, expired, or rejected.
- * Caught by the worker retry loop which rotates proxy and retries with fresh cookie.
- */
-export class InvalidSessionCookieError extends Error {
-  constructor(message = 'Session cookie invalid or expired — auth API returned 401') {
-    super(message);
-    this.name = 'InvalidSessionCookieError';
-  }
-}

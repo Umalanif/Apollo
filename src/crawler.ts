@@ -17,7 +17,7 @@ import type { Page } from 'playwright';
 import { getEnv } from './env/schema';
 import { logger } from './logger';
 import { detectChallenge, ChallengeDetection } from './challenge-detector';
-import { ChallengeBypassSignal, InvalidSessionCookieError } from './errors';
+import { ChallengeBypassSignal } from './errors';
 
 // ── Proxy URL builder ─────────────────────────────────────────────────────────
 
@@ -26,54 +26,6 @@ export function buildProxyUrl(port: number = 10000): string {
   return `http://${PROXY_USERNAME}:${PROXY_PASSWORD}@${PROXY_HOST}:${port}`;
 }
 
-// ── Apollo cookie hydration ─────────────────────────────────────────────────────
-
-interface CookieDef {
-  name: string;
-  value: string;
-  domain: string;
-  path: string;
-  secure: boolean;
-  httpOnly: boolean;
-}
-
-function parseCookieString(cookieStr: string): CookieDef[] {
-  // Handle JSON array format (e.g. from browser cookie dump in .env)
-  if (cookieStr.trim().startsWith('[')) {
-    try {
-      const parsed = JSON.parse(cookieStr) as Array<{
-        name: string;
-        value: string;
-        domain?: string;
-        path?: string;
-        secure?: boolean;
-        httpOnly?: boolean;
-      }>;
-      return parsed.map(c => ({
-        name: c.name,
-        value: c.value,
-        domain: c.domain ?? '.apollo.io',
-        path: c.path ?? '/',
-        secure: c.secure ?? true,
-        httpOnly: c.httpOnly ?? false,
-      }));
-    } catch {
-      // Fall through to semicolon-split parsing
-    }
-  }
-  // Handle semicolon-separated cookie string
-  return cookieStr.split(';').map(cookieStr => {
-    const [name, ...rest] = cookieStr.trim().split('=');
-    return {
-      name: name.trim(),
-      value: rest.join('=').trim(),
-      domain: '.apollo.io',
-      path: '/',
-      secure: true,
-      httpOnly: false,
-    };
-  });
-}
 
 // ── Session warm-up helper ─────────────────────────────────────────────────────
 
@@ -82,7 +34,7 @@ function parseCookieString(cookieStr: string): CookieDef[] {
  * validate session via page title, then set the target hash route.
  *
  * Returns when the page is stable on the target hash, or throws
- * InvalidSessionCookieError / ChallengeBypassSignal on fatal rejection.
+ * ChallengeBypassSignal on fatal rejection.
  */
 async function warmUpAndNavigateToHash(
   page: Page,
@@ -105,10 +57,7 @@ async function warmUpAndNavigateToHash(
   logger.debug({ jobId, title }, 'Warm-up: page title received');
 
   if (title.toLowerCase().includes('log in')) {
-    logger.error({ jobId, title }, 'SESSION_REJECTED — cookies rejected, need fresh session');
-    throw new InvalidSessionCookieError(
-      `Session cookie rejected — page title is "${title}"`,
-    );
+    logger.warn({ jobId, title }, 'Log In page detected after warm-up — TODO: Phase 16.2 - Trigger Auto-Login Flow here');
   }
 
   // Title should contain "Home" or "Dashboard" for a valid authenticated session
@@ -161,7 +110,6 @@ async function preNavigationHook(
   _gotoOptions: unknown,
 ): Promise<void> {
   const { page } = crawlingContext;
-  const { APOLLO_SESSION_COOKIE } = getEnv();
 
   // Inject stealth evasions via page.evaluate
   await page.addInitScript(() => {
@@ -239,40 +187,9 @@ async function preNavigationHook(
     });
   });
 
-  // Hydrate session cookies for Apollo
-  if (APOLLO_SESSION_COOKIE) {
-    const cookies = parseCookieString(APOLLO_SESSION_COOKIE);
-    await page.context().addCookies(cookies);
-    logger.debug({ cookieCount: cookies.length }, 'Apollo session cookies injected');
-  }
-
-  // ── Phase 7.5: Session health check after cookie injection ─────────────────
-  // Verify the session is still valid by hitting the auth health endpoint.
-  // If the API returns 401 / Login Required, throw InvalidSessionCookieError
-  // to trigger proxy rotation with a fresh session cookie.
-  try {
-    const healthResponse = await page.evaluate(async () => {
-      const res = await fetch('https://app.apollo.io/api/v1/auth/health', {
-        credentials: 'include',
-      });
-      return { status: res.status, ok: res.ok };
-    });
-
-    if (healthResponse.status === 401 || !healthResponse.ok) {
-      logger.warn({ healthStatus: healthResponse.status }, 'Session health check failed — INVALID_SESSION_COOKIE');
-      throw new InvalidSessionCookieError(
-        `Session cookie rejected — auth health endpoint returned ${healthResponse.status}`,
-      );
-    }
-
-    logger.debug({ healthStatus: healthResponse.status }, 'Session health check passed');
-  } catch (err) {
-    if (err instanceof InvalidSessionCookieError) {
-      throw err; // re-throw to propagate to worker retry loop
-    }
-    // Network / fetch errors are non-fatal — log and continue
-    logger.warn({ err: String(err) }, 'Session health check error (non-fatal)');
-  }
+  // ── Proxy authentication header injection ─────────────────────────────────
+  // The proxy requires Basic auth — inject into headers on every request
+  // This is handled by Playwright's proxy configuration, no extra work needed.
 }
 
 // ── Resource blocker ───────────────────────────────────────────────────────────
@@ -368,10 +285,10 @@ export async function createCrawler(deps: CrawlerDeps): Promise<PlaywrightCrawle
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     requestHandler: async ({ page, request }: { page: Page; request: any }) => {
       // ── Set User-Agent from Brave ───────────────────────────────────────────
-      const { BRAVE_USER_AGENT } = getEnv();
-      if (BRAVE_USER_AGENT) {
-        await page.context().setExtraHTTPHeaders({ 'User-Agent': BRAVE_USER_AGENT });
-        logger.debug({ jobId, userAgent: BRAVE_USER_AGENT.slice(0, 50) }, 'Brave User-Agent set via headers');
+      const { APOLLO_EMAIL, APOLLO_PASSWORD } = getEnv();
+      if (APOLLO_EMAIL && APOLLO_PASSWORD) {
+        // Auto-login credentials available — logging for future Phase 16.2
+        logger.debug({ jobId, email: APOLLO_EMAIL.slice(0, 3) + '***' }, 'Apollo credentials available for auto-login');
       }
 
       // ── Log requestfailed events ────────────────────────────────────────────

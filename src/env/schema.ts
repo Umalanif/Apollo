@@ -38,8 +38,8 @@ const EnvSchema = z.object({
   PROXY_USERNAME: z.string().min(1, 'PROXY_USERNAME is required'),
   PROXY_PASSWORD: z.string().min(1, 'PROXY_PASSWORD is required'),
   TWO_CAPTCHA_API_KEY: z.string().min(1, 'TWO_CAPTCHA_API_KEY is required'),
-  APOLLO_SESSION_COOKIE: z.string().min(1, 'APOLLO_SESSION_COOKIE is required'),
-  BRAVE_USER_AGENT: z.string().optional(),
+  APOLLO_EMAIL: z.string().email('APOLLO_EMAIL must be a valid email'),
+  APOLLO_PASSWORD: z.string().min(1, 'APOLLO_PASSWORD is required'),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

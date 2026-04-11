@@ -26,7 +26,7 @@ import { logger } from './logger';
 import { createCrawler } from './crawler';
 import { ChallengeDetection } from './challenge-detector';
 import { solveRecaptcha } from './captcha-solver';
-import { ChallengeBypassSignal, InvalidSessionCookieError } from './errors';
+import { ChallengeBypassSignal } from './errors';
 import { scrapeLeadsFromPage } from './leads-scraper';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -211,14 +211,12 @@ async function run(): Promise<void> {
         break;
 
       } catch (err) {
-        if (err instanceof ChallengeBypassSignal || err instanceof InvalidSessionCookieError) {
-          const challengeType = err instanceof ChallengeBypassSignal
-            ? err.challengeType
-            : 'INVALID_SESSION_COOKIE';
-          const url = err instanceof ChallengeBypassSignal ? err.url : '(session health check)';
+        if (err instanceof ChallengeBypassSignal) {
+          const challengeType = err.challengeType;
+          const url = err.url;
           logger.warn(
             { jobId: data.jobId, challengeType, url, proxyPort },
-            'ChallengeBypassSignal / InvalidSessionCookieError — rotating proxy port',
+            'ChallengeBypassSignal — rotating proxy port',
           );
           proxyPort++;
           failCount = 0;
