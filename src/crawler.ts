@@ -14,7 +14,6 @@
 import { PlaywrightCrawler } from 'crawlee';
 import { ProxyConfiguration } from '@crawlee/core';
 import type { Page } from 'playwright';
-import * as fs from 'fs';
 import * as path from 'path';
 import { getEnv } from './env/schema';
 import { logger } from './logger';
@@ -54,40 +53,33 @@ async function warmUpAndNavigateToHash(
   hashPath: string,
   jobId: string,
 ): Promise<void> {
-  const HOME_URL = 'https://app.apollo.io/';
-  const WARM_UP_MS = 6_000; // 5-7 seconds for Segment/Sentry/Datadog to load
+  // Build target URL — navigate DIRECTLY to the hash route, not to home first.
+  // Apollo's SPA will redirect to #/login?redirectTo=... if session is invalid.
+  // Keep the leading '#' so URL is https://app.apollo.io/#/people (not //people)
+  const url = `https://app.apollo.io/${hashPath}`;
+  logger.debug({ jobId, url }, 'Warm-up: navigating directly to target URL');
+  await page.goto(url, { waitUntil: 'domcontentloaded' });
 
-  // Step 1: Navigate to Apollo home to initialize the React app
-  logger.debug({ jobId, url: HOME_URL }, 'Warm-up: navigating to Apollo home');
-  await page.goto(HOME_URL, { waitUntil: 'domcontentloaded' });
+  // Wait for React app to settle (either stay on target route or redirect to login)
+  await page.waitForFunction(
+    () => {
+      return !window.location.href.includes('#/login?redirectTo=') || window.location.hash.startsWith('#/login');
+    },
+    { timeout: 20_000 },
+  ).catch(() => {
+    logger.debug({ jobId }, 'Warm-up: URL stability check timed out — continuing anyway');
+  });
 
-  // Step 2: Wait for background scripts (Segment, Sentry, Datadog) to load
-  logger.debug({ jobId, waitMs: WARM_UP_MS }, 'Warm-up: waiting for background scripts');
-  await page.waitForTimeout(WARM_UP_MS);
-
-  // Step 3: Validate session via page title
+  // Validate session via page title — if login page detected, trigger auto-login
   const title = await page.title();
   logger.debug({ jobId, title }, 'Warm-up: page title received');
 
-  if (title.toLowerCase().includes('log in')) {
+  if (title.toLowerCase().includes('log in') || title.toLowerCase().includes('login') || page.url().includes('/login')) {
     logger.warn({ jobId, title }, 'Log In page detected — triggering auto-login');
     await AuthManager.ensureAuthenticated(page, jobId);
   }
 
-  // Title should contain "Home" or "Dashboard" for a valid authenticated session
-  const hasValidTitle = title.toLowerCase().includes('home') ||
-                        title.toLowerCase().includes('dashboard');
-  if (!hasValidTitle) {
-    logger.warn({ jobId, title }, 'Warm-up: unexpected page title — proceeding anyway');
-  }
-
-  // Step 4: Set the hash route via JavaScript
-  logger.debug({ jobId, hashPath }, 'Warm-up: setting window.location.hash');
-  await page.evaluate((hash: string) => {
-    window.location.hash = hash;
-  }, hashPath);
-
-  // Step 5: Wait for hash router to process
+  // Wait for hash router to process
   await page.waitForFunction(
     (expectedHash: string) => window.location.hash.startsWith(expectedHash.split('?')[0]),
     hashPath.split('?')[0],
@@ -95,20 +87,6 @@ async function warmUpAndNavigateToHash(
   ).catch(err => {
     logger.warn({ jobId, hash: hashPath }, `Hash router wait failed: ${err.message}`);
   });
-
-  // Step 6: Detect "Get Started" — Apollo's redirect when session is marginal
-  const bodyText = await page.evaluate(() => document.body.innerText);
-  if (bodyText.includes('Get Started')) {
-    logger.warn({ jobId }, 'Get Started detected after hash navigation — reloading once');
-    await page.reload({ waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(WARM_UP_MS);
-
-    const bodyTextAfterReload = await page.evaluate(() => document.body.innerText);
-    if (bodyTextAfterReload.includes('Get Started')) {
-      logger.error({ jobId }, 'Get Started still present after reload — giving up');
-      throw new ChallengeBypassSignal('get_started_redirect', page.url());
-    }
-  }
 
   logger.info({ jobId, hash: hashPath }, 'Warm-up: hash routing complete');
 }
@@ -124,9 +102,17 @@ async function preNavigationHook(
   _gotoOptions: unknown,
 ): Promise<void> {
   const { page } = crawlingContext;
+  page.setDefaultNavigationTimeout(120_000);
+  page.setDefaultTimeout(120_000);
 
   // Inject stealth evasions via page.evaluate
   await page.addInitScript(() => {
+    const hostname = window.location.hostname;
+    const isMicrosoftAuthHost = [
+      'microsoftonline.com',
+      'microsoft.com',
+      'msftauth.net',
+    ].some(domain => hostname === domain || hostname.endsWith(`.${domain}`));
     // navigator.webdriver = false
     Object.defineProperty(navigator, 'webdriver', {
       get: () => false,
@@ -161,19 +147,21 @@ async function preNavigationHook(
       configurable: true,
     });
 
-    // window.chrome — enable chrome.runtime
-    if ((globalThis as unknown as Record<string, unknown>).chrome === undefined) {
-      (globalThis as unknown as Record<string, unknown>).chrome = {};
+    // window.chrome — ONLY expose minimal chrome.runtime stub.
+    // WARNING: chrome.app and chrome.runtime cause "Cannot redefine property: chrome"
+    // errors in Microsoft OAuth popup windows. Only use basic stubs here.
+    if (!isMicrosoftAuthHost) {
+      if ((globalThis as unknown as Record<string, unknown>).chrome === undefined) {
+        (globalThis as unknown as Record<string, unknown>).chrome = {};
+      }
+      Object.defineProperty(globalThis, 'chrome', {
+        get: () => ({
+          loadTimes: () => ({}),
+          csi: () => ({}),
+        }),
+        configurable: true,
+      });
     }
-    Object.defineProperty(globalThis, 'chrome', {
-      get: () => ({
-        runtime: {},
-        loadTimes: () => ({}),
-        csi: () => ({}),
-        app: {},
-      }),
-      configurable: true,
-    });
 
     // navigator.permissions — fake permissions API
     const origQuery = (navigator.permissions as unknown as { query: (params: { name: string }) => Promise<{ status: string }> }).query;
@@ -204,28 +192,6 @@ async function preNavigationHook(
   // ── Proxy authentication header injection ─────────────────────────────────
   // The proxy requires Basic auth — inject into headers on every request
   // This is handled by Playwright's proxy configuration, no extra work needed.
-
-  // ── Session cookie injection from storage/auth.json ───────────────────────
-  // If a valid auth.json exists, load its cookies into the context so the
-  // page navigation uses the existing authenticated session.
-  const authFilePath = path.resolve('storage/auth.json');
-  if (fs.existsSync(authFilePath)) {
-    try {
-      const authState = JSON.parse(fs.readFileSync(authFilePath, 'utf-8'));
-      if (authState.cookies && Array.isArray(authState.cookies)) {
-        // Filter to Apollo-relevant cookies and add them to the context
-        const apolloCookies = authState.cookies.filter(
-          (c: { domain?: string }) => c.domain && c.domain.includes('apollo.io'),
-        );
-        if (apolloCookies.length > 0) {
-          await page.context().addCookies(apolloCookies);
-          logger.debug({ cookieCount: apolloCookies.length }, 'Apollo session cookies loaded');
-        }
-      }
-    } catch (err) {
-      logger.debug({ err }, 'Failed to load auth.json cookies (non-fatal)');
-    }
-  }
 }
 
 // ── Resource blocker ───────────────────────────────────────────────────────────
@@ -266,6 +232,16 @@ const BLOCKED_TYPES = new Set([
   'preflight',
 ]);
 
+const MICROSOFT_AUTH_HOST_PATTERNS = [
+  'microsoftonline.com',
+  'microsoft.com',
+  'msftauth.net',
+];
+
+function isMicrosoftAuthUrl(url: string): boolean {
+  return MICROSOFT_AUTH_HOST_PATTERNS.some(pattern => url.includes(pattern));
+}
+
 // ── Crawler factory ─────────────────────────────────────────────────────────────
 
 export interface CrawlerDeps {
@@ -293,16 +269,31 @@ export async function createCrawler(deps: CrawlerDeps): Promise<PlaywrightCrawle
     'Creating PlaywrightCrawler',
   );
 
+  const proxyComponents = getProxyComponents(proxyPort);
+
   const crawler = new PlaywrightCrawler({
     // ── Concurrency: single page — anti-detection ─────────────────────────────
     maxConcurrency: 1,
     maxRequestRetries: 2,
 
+    // ── Proxy: explicit auth — bypasses ProxyConfiguration abstraction ──────
     proxyConfiguration: new ProxyConfiguration({ proxyUrls: [buildProxyUrl(proxyPort)] }),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     launchContext: {
-      // Playwright launch options — add automation-controlled flag
+      // Persistent Profile: saves FRESH Cloudflare cookies natively
+      // userDataDir at launchContext level triggers launchPersistentContext internally
+      userDataDir: path.join(process.cwd(), 'storage/browser_profile'),
       launchOptions: {
+        // 1. Explicit Proxy Auth: fixes ERR_TUNNEL_CONNECTION_FAILED
+        proxy: {
+          server: `http://${proxyComponents.server.replace('http://', '')}`,
+          username: proxyComponents.username,
+          password: proxyComponents.password,
+        },
+        // 2. Headful mode for CDN debugging + slowMo for visual following
+        headless: false,
+        slowMo: 1000,
+        // 3. Automation flag + proxy bypass for Microsoft OAuth domains
         args: [
           '--disable-blink-features=AutomationControlled',
           '--no-sandbox',
@@ -310,11 +301,10 @@ export async function createCrawler(deps: CrawlerDeps): Promise<PlaywrightCrawle
           '--disable-dev-shm-usage',
           '--disable-accelerated-2d-canvas',
           '--disable-gpu',
+          // Bypass proxy for Microsoft auth/CDN domains so OAuth popup renders correctly
+          '--proxy-bypass-list=*.microsoftonline.com,*.msauth.net,*.msftauth.net,*.live.com,*.microsoft.com',
         ],
       },
-      // Persistent context — browser stores cookies, localStorage, IndexedDB in real time
-      // like a normal user profile, eliminating storageState write-order issues.
-      userDataDir: './storage/browser_profile',
     } as any,
 
     // ── Navigation hooks ────────────────────────────────────────────────────
@@ -343,6 +333,9 @@ export async function createCrawler(deps: CrawlerDeps): Promise<PlaywrightCrawle
       await page.route('**/*', async route => {
         const url = route.request().url();
         const type = route.request().resourceType();
+        if (isMicrosoftAuthUrl(url)) {
+          return route.continue();
+        }
 
         // Always allow Apollo — needed for API calls
         if (url.includes('apollo.io')) {

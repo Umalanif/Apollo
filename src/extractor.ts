@@ -1,11 +1,11 @@
 /**
- * Apollo API Extractor — got client for hidden XHR/GraphQL endpoints
+ * Apollo API Extractor â€” got client for hidden XHR/GraphQL endpoints
  *
  * Phase 7.1: Mirrors Playwright proxy config (same IP across browser + API),
  *            uses Bottleneck for 3-15s request throttling.
  *
  * Session auth: CSRF token + session cookies injected from Playwright page context.
- * Retry loop: increments proxy port on failure → new sticky exit IP.
+ * Retry loop: increments proxy port on failure â†’ new sticky exit IP.
  *
  * Key endpoint discovered from live traffic:
  *   POST https://app.apollo.io/api/v1/organizations/load_snippets
@@ -16,7 +16,7 @@ import { wrap } from './bottleneck';
 import { logger } from './logger';
 import { HttpProxyAgent } from 'http-proxy-agent';
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface SessionAuth {
   csrfToken: string;
@@ -32,12 +32,12 @@ export interface ApolloOrganization {
   city?: string;
   state?: string;
   country?: string;
-  // … additional fields from response.json
+  // â€¦ additional fields from response.json
 }
 
 export interface LoadSnippetsResponse {
   organizations: ApolloOrganization[];
-  // … additional pagination/meta fields
+  // â€¦ additional pagination/meta fields
 }
 
 export interface ExtractorDeps {
@@ -46,11 +46,11 @@ export interface ExtractorDeps {
   auth: SessionAuth;
 }
 
-// ── got callable instance type ────────────────────────────────────────────────
+// â”€â”€ got callable instance type â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 type GotInstance = ReturnType<typeof import('got').got.extend>;
 
-// ── Static Apollo headers (mirror Playwright browser headers) ──────────────────
+// â”€â”€ Static Apollo headers (mirror Playwright browser headers) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function buildApolloHeaders(auth: SessionAuth): Record<string, string> {
   return {
@@ -73,7 +73,7 @@ function buildApolloHeaders(auth: SessionAuth): Record<string, string> {
   };
 }
 
-// ── got instance factory ───────────────────────────────────────────────────────
+// â”€â”€ got instance factory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Create a got instance pre-configured for Apollo API calls.
@@ -99,21 +99,21 @@ export async function createApolloClient(deps: ExtractorDeps): Promise<GotInstan
   const client = (got as any).extend({
     prefixUrl: 'https://app.apollo.io',
 
-    // ── Proxy: same IP as Playwright browser context via HttpProxyAgent ──────
+    // â”€â”€ Proxy: same IP as Playwright browser context via HttpProxyAgent â”€â”€â”€â”€â”€â”€
     agent: {
       http: new HttpProxyAgent(proxyUrl),
       https: new HttpProxyAgent(proxyUrl),
     },
 
-    // ── Headers: mirrors live browser traffic exactly ────────────────────────
+    // â”€â”€ Headers: mirrors live browser traffic exactly â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     headers: buildApolloHeaders(auth),
 
-    // ── Timeout: generous enough for slow proxy + Apollo API ─────────────────
+    // â”€â”€ Timeout: generous enough for slow proxy + Apollo API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     timeout: {
       request: 30_000,
     },
 
-    // ── Retry on network / 5xx failures ─────────────────────────────────────
+    // â”€â”€ Retry on network / 5xx failures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     retry: {
       limit: 2,
       methods: ['POST', 'GET'],
@@ -121,14 +121,14 @@ export async function createApolloClient(deps: ExtractorDeps): Promise<GotInstan
       errorCodes: ['ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'ECONNREFUSED'],
     },
 
-    // ── Response parsing ─────────────────────────────────────────────────────
+    // â”€â”€ Response parsing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     responseType: 'json',
   });
 
   return client as GotInstance;
 }
 
-// ── Throttled API call to load_snippets ───────────────────────────────────────
+// â”€â”€ Throttled API call to load_snippets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Fetch organization detail snippets from Apollo's hidden load_snippets endpoint.
@@ -160,7 +160,7 @@ export async function loadOrganizationSnippets(
   });
 }
 
-// ── CSRF + cookie extractor from Playwright page ───────────────────────────────
+// â”€â”€ CSRF + cookie extractor from Playwright page â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Pull CSRF token and full cookie string from a live Playwright page.
@@ -183,13 +183,15 @@ export async function extractSessionAuth(
     return ((window as unknown) as Record<string, unknown>).__csrfToken as string ?? '';
   });
 
-  const cookies = await page.context().cookies();
-  const cookieString = cookies
+  const currentApolloUrl = page.url().includes('apollo.io') ? page.url() : 'https://app.apollo.io/';
+  const cookies = await page.context().cookies(currentApolloUrl);
+  const apolloCookies = cookies.filter(cookie => cookie.domain === 'apollo.io' || cookie.domain.endsWith('.apollo.io'));
+  const cookieString = apolloCookies
     .map(c => `${c.name}=${c.value}`)
     .join('; ');
 
   logger.debug(
-    { csrfToken: csrfToken.slice(0, 10) + '…', cookieCount: cookies.length },
+    { csrfToken: csrfToken.slice(0, 10) + '...', cookieCount: apolloCookies.length, pageUrl: page.url() },
     'Session auth extracted',
   );
 

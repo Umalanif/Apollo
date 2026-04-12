@@ -8,7 +8,12 @@
       "Bash(cd /d V:\\\\Scraping\\\\Apollo)",
       "Bash(node -e \"const {chromium} = require\\('playwright'\\); console.log\\(Object.keys\\(chromium\\)\\); console.log\\(Object.getOwnPropertyNames\\(Object.getPrototypeOf\\(chromium\\)\\).slice\\(0,20\\)\\)\")",
       "Bash(sqlite3 /v/Scraping/Apollo/prisma/dev.db \"SELECT COUNT\\(*\\) FROM Lead;\")",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(fuser -k 3000/tcp)",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //F //PID 8140)",
+      "Bash(ls -la logs/debug*.png)",
+      "Bash(sqlite3 dev.db \"SELECT COUNT\\(*\\) as lead_count FROM leads;\")"
     ]
   }
 }

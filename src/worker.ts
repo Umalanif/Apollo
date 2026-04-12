@@ -70,16 +70,34 @@ function post(msg: OutgoingMessage): void {
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
+// PHASE 20.1: AUTH DRY RUN — stop after 1 lead to validate Microsoft SSO flow
+const DRY_RUN = true;
+let dryRunDone = false;
+
 async function run(): Promise<void> {
-  const data = workerData as WorkerData;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let data: WorkerData = workerData as WorkerData;
+
+  // Standalone mode (no parentPort) — duplicate critical logs to console
+  if (!parentPort) {
+    console.error('[STANDALONE] No parentPort detected — running in debug mode');
+    console.error('[STANDALONE] workerData:', JSON.stringify(data));
+  }
+
+  // PHASE 20.1: Use a default jobId for standalone DRY_RUN
+  if (!data?.jobId) {
+    if (DRY_RUN) {
+      data = { jobId: 'dry-run-auth', targeting: {} };
+      console.error('[STANDALONE DRY RUN] Using default jobId: dry-run-auth');
+    } else {
+      logger.error({ err: 'workerData.jobId is required' }, 'Invalid worker data');
+      console.error('[STANDALONE ERROR] workerData.jobId is required — bailing out');
+      post({ type: 'error', payload: { message: 'workerData.jobId is required' } });
+      return;
+    }
+  }
 
   logger.info({ jobId: data?.jobId, targeting: data?.targeting }, 'Worker started');
-
-  if (!data?.jobId) {
-    logger.error({ err: 'workerData.jobId is required' }, 'Invalid worker data');
-    post({ type: 'error', payload: { message: 'workerData.jobId is required' } });
-    return;
-  }
 
   post({ type: 'progress', payload: { collected: 0, saved: 0 } });
 
@@ -166,10 +184,19 @@ async function run(): Promise<void> {
           const rawLeads = await scrapeLeadsFromPage(page, data.jobId);
 
           for (const raw of rawLeads) {
+            if (DRY_RUN && dryRunDone) break;
             try {
               await saveLead(data.jobId, raw);
               saved++;
+              dryRunDone = true;
               logger.debug({ jobId: data.jobId, linkedInUrl: raw.linkedInUrl }, 'Lead saved');
+
+              // PHASE 20.1: AUTH VERIFICATION HOOK — log and pause for human verification
+              logger.info('[AUTH CHECK] Successfully reached People Dashboard.');
+              logger.info('[AUTH CHECK] Current URL: ' + page.url());
+              logger.info('[AUTH CHECK] Pausing 10 seconds for visual confirmation...');
+              await page.waitForTimeout(10_000);
+              logger.info('[AUTH CHECK] Dry run complete — shutting down gracefully.');
             } catch (err) {
               // saveLead already logs invalid parse as warn; other errors: log and continue
               if (err instanceof Error && !err.message.includes('Invalid lead data')) {
@@ -179,6 +206,7 @@ async function run(): Promise<void> {
                 );
               }
             }
+            if (DRY_RUN && dryRunDone) break;
           }
 
           post({ type: 'progress', payload: { collected: rawLeads.length, saved } });
