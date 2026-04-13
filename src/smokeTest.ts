@@ -1,4 +1,5 @@
 import { chromium, type BrowserContext, type ConsoleMessage, type Page } from 'playwright';
+import { extractSessionAuth } from './extractor';
 
 const SMOKE_TEST_URL = 'https://app.apollo.io/#/login?locale=en';
 const OBSERVATION_MS = 30_000;
@@ -227,14 +228,134 @@ async function main(): Promise<void> {
     console.log('[smoke] networkidle wait timed out; continuing with current page state');
   });
 
-  await logApolloCookies(context);
+  // ── Microsoft OAuth Login Flow ─────────────────────────────────────────────
+  const email = process.env.APOLLO_MS_EMAIL;
+  const password = process.env.APOLLO_MS_PASSWORD;
 
-  const emailInput = page.locator('input[type="email"], input[name="loginfmt"], input[autocomplete="username"]').first();
-  const emailInputVisible = await emailInput.isVisible().catch(() => false);
-  console.log(`[smoke] Microsoft email input visible on current page: ${emailInputVisible}`);
-  console.log(`[smoke] Current URL: ${page.url()}`);
-  console.log(`[smoke] Waiting ${OBSERVATION_MS / 1000}s for manual inspection`);
+  if (!email || !password) {
+    console.error('[smoke] FATAL: APOLLO_MS_EMAIL and APOLLO_MS_PASSWORD must be set in .env');
+    process.exitCode = 1;
+    await browser.close();
+    return;
+  }
 
+  console.log('[smoke] Starting Microsoft OAuth login flow');
+
+  // Step 0: Click "Log In with Microsoft" button on Apollo login page
+  try {
+    const microsoftBtn = page.locator('button[data-cta-variant="secondary"]:has-text("Log In with Microsoft")').first();
+    await microsoftBtn.waitFor({ timeout: 60_000 });
+    console.log('[smoke] Step 0: "Log In with Microsoft" button visible — clicking it');
+    await microsoftBtn.click();
+    console.log('[smoke] Step 0: Clicked "Log In with Microsoft"');
+  } catch (err) {
+    console.error('[smoke] FAILURE at Step 0 (Microsoft button):', err instanceof Error ? err.message : err);
+    process.exitCode = 1;
+    await browser.close();
+    return;
+  }
+
+  // Step 1: Wait for Microsoft email input
+  try {
+    const emailInput = page.locator('input[type="email"], input[name="loginfmt"]').first();
+    await emailInput.waitFor({ timeout: 60_000 });
+    console.log('[smoke] Step 1: Email input visible — filling email');
+    await emailInput.fill(email);
+    await page.locator('button[type="submit"], #idSIButton9, input[type="submit"]').first().click();
+    console.log('[smoke] Step 1: Email submitted — clicked Next');
+  } catch (err) {
+    console.error('[smoke] FAILURE at Step 1 (email input):', err instanceof Error ? err.message : err);
+    process.exitCode = 1;
+    await browser.close();
+    return;
+  }
+
+  // Step 2: Click "Use your password" link (Microsoft shows this before password input)
+  try {
+    await page.waitForTimeout(2000); // Allow page to render options
+    const usePasswordLink = page.locator('span[role="button"]:has-text("Use your password")').first();
+    await usePasswordLink.waitFor({ timeout: 60_000 });
+    console.log('[smoke] Step 2: "Use your password" link visible — clicking it');
+    await usePasswordLink.click();
+    console.log('[smoke] Step 2: Clicked "Use your password"');
+  } catch (err) {
+    console.error('[smoke] FAILURE at Step 2 (Use your password link):', err instanceof Error ? err.message : err);
+    process.exitCode = 1;
+    await browser.close();
+    return;
+  }
+
+  // Step 3: Wait for password field
+  try {
+    await page.waitForTimeout(2000); // Allow Microsoft to route to password page
+    const passwordInput = page.locator('input[type="password"], input[name="passwd"]').first();
+    await passwordInput.waitFor({ timeout: 60_000 });
+    console.log('[smoke] Step 3: Password input visible — filling password');
+    await passwordInput.fill(password);
+    await page.locator('button[type="submit"], #idSIButton9, input[type="submit"]').first().click();
+    console.log('[smoke] Step 3: Password submitted — clicked Sign in');
+  } catch (err) {
+    console.error('[smoke] FAILURE at Step 3 (password input):', err instanceof Error ? err.message : err);
+    process.exitCode = 1;
+    await browser.close();
+    return;
+  }
+
+  // Step 4: Handle "Stay signed in?" prompt if it appears
+  try {
+    await page.waitForTimeout(2000); // Allow redirect to start
+    const staySignedInBtn = page.locator('button[data-testid="primaryButton"]:has-text("Yes")').first();
+    const isVisible = await staySignedInBtn.isVisible({ timeout: 5000 }).catch(() => false);
+    if (isVisible) {
+      console.log('[smoke] Step 4: "Stay signed in" prompt detected — clicking Yes');
+      await staySignedInBtn.click();
+    } else {
+      console.log('[smoke] Step 4: "Stay signed in" prompt not visible — continuing');
+    }
+  } catch (err) {
+    console.warn('[smoke] Step 4: KMSI check failed — continuing:', err instanceof Error ? err.message : err);
+  }
+
+  // Step 5: Wait for redirect back to apollo.io
+  try {
+    console.log('[smoke] Step 5: Waiting for redirect to app.apollo.io (timeout: 120s)');
+    await page.waitForURL(/app\.apollo\.io(?!.*\/login)/i, { timeout: 120_000 });
+    console.log('[smoke] Step 5: Redirected to apollo.io — URL matches target');
+  } catch (err) {
+    console.error('[smoke] FAILURE at Step 5 (redirect to apollo.io):', err instanceof Error ? err.message : err);
+    process.exitCode = 1;
+    await browser.close();
+    return;
+  }
+
+  // Step 6: Call extractSessionAuth() and print results
+  await page.waitForLoadState('networkidle').catch(() => {
+    console.log('[smoke] networkidle wait timed out; continuing with current page state');
+  });
+
+  let authResult: Awaited<ReturnType<typeof extractSessionAuth>> | null = null;
+  try {
+    authResult = await extractSessionAuth(page);
+  } catch (err) {
+    console.error('[smoke] extractSessionAuth() threw:', err instanceof Error ? err.message : err);
+  }
+
+  const allCookies = await context.cookies();
+  const apolloCookies = allCookies.filter(c => c.domain.includes('apollo.io'));
+
+  console.log('[smoke] Step 6: extractSessionAuth() results:');
+  console.log(`  Apollo cookie count: ${apolloCookies.length}`);
+  console.log(`  CSRF token found: ${authResult?.csrfToken ? 'true' : 'false'}`);
+
+  // Step 7: Print final verdict
+  if (apolloCookies.length > 0) {
+    console.log('[smoke] RESULT: SUCCESS — apollo.io cookies found after login');
+  } else {
+    console.error('[smoke] RESULT: FAILURE — no apollo.io cookies found after login');
+    process.exitCode = 1;
+  }
+
+  console.log(`[smoke] Waiting ${OBSERVATION_MS / 1000}s for observation`);
   await page.waitForTimeout(OBSERVATION_MS);
   await browser.close();
 }

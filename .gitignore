@@ -13,6 +13,7 @@ out/
 .env.development
 .env.production
 *.env
+!.env.example
 
 # Logs
 logs/

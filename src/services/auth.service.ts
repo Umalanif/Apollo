@@ -34,10 +34,14 @@ function isAuthStateValid(): boolean {
 
 /**
  * Perform the login flow on the Apollo login page using Microsoft SSO.
- * Handles the full Microsoft OAuth flow and returns to Apollo.
+ * Implements strict Auth Pipeline: no navigation to #/people until OAuth completes.
  *
- * Phase 17.4: Microsoft login opens a popup window — we capture it via
- * waitForEvent('popup') and perform all steps inside the popup object.
+ * Strict Execution Steps:
+ * 1. Navigate to https://app.apollo.io/#/login (NOT #/people)
+ * 2. Click "Log in with Microsoft" button
+ * 3. Handle Microsoft OAuth (email → conditional password gateway → password → KMSI)
+ * 4. Wait for redirect back to app.apollo.io/#/people
+ * 5. Only then save storageState
  */
 async function performLogin(page: Page, jobId: string): Promise<void> {
   const { APOLLO_EMAIL, APOLLO_PASSWORD } = getEnv();
@@ -65,7 +69,7 @@ async function performLogin(page: Page, jobId: string): Promise<void> {
   try {
     const [capturedPopup] = await Promise.all([
       page.waitForEvent('popup', { timeout: 15_000 }),
-      page.locator('button').filter({ hasText: /Microsoft/i }).first().click(),
+      page.locator('button:has-text("Log in with Microsoft")').click(),
     ]);
     popup = capturedPopup;
     popup.setDefaultNavigationTimeout(OAUTH_TIMEOUT_MS);
@@ -74,7 +78,6 @@ async function performLogin(page: Page, jobId: string): Promise<void> {
     logger.info({ jobId, url: popup.url().substring(0, 80) }, '[AUTH] Step 1: Popup captured');
 
     // ── Ignore failed requests to non-critical tracking/CDN domains ──────────
-    // This saves proxy bandwidth for the Microsoft CDN and prevents noise in logs
     const NON_CRITICAL_DOMAINS = new Set([
       'sentry.io',
       'google-analytics.com',
@@ -102,14 +105,14 @@ async function performLogin(page: Page, jobId: string): Promise<void> {
     throw new AuthenticationError('Step 1 failed: Could not open Microsoft SSO popup');
   }
 
-  // ── Step 2: Enter Email inside the popup ────────────────────────────────────
+  // ── Step 2: Microsoft OAuth - Email ─────────────────────────────────────────
   try {
-    const emailInput = popup.locator('input[type="email"], input[name="loginfmt"]').first();
+    const emailInput = popup.locator('input[type="email"], input[name="loginfmt"], #i0116').first();
     await emailInput.waitFor({ timeout: 30_000 });
     await emailInput.fill(APOLLO_EMAIL);
-    logger.info({ jobId }, '[AUTH] Step 2: Filled email in popup');
+    logger.info({ jobId }, '[AUTH] Step 2: Filled email');
 
-    const nextButton = popup.locator('input[type="submit"], #idSIButton9').first();
+    const nextButton = popup.locator('button[type="submit"], #idSIButton9, input[type="submit"]').first();
     await nextButton.click();
     logger.info({ jobId }, '[AUTH] Step 2: Clicked Next');
 
@@ -120,27 +123,33 @@ async function performLogin(page: Page, jobId: string): Promise<void> {
     throw new AuthenticationError('Step 2 failed: Could not enter email on Microsoft IDP');
   }
 
-  // ── Step 3: Bypass email code — click "Use your password instead" ───────────
+  // ── Step 3: Conditional Branch - Password Gateway ───────────────────────────
+  // Microsoft sometimes prompts for Authenticator app by default.
+  // Check if "Use your password" link is visible before clicking.
   try {
-    const switchToPassword = popup.locator('#idA_PWD_SwitchToPassword').first();
-    await switchToPassword.waitFor({ timeout: 30_000 });
-    await switchToPassword.click();
-    logger.info({ jobId }, '[AUTH] Step 3: Switched to password option');
+    const usePasswordLink = popup.locator('text=Use your password').first();
+    const isPasswordLinkVisible = await usePasswordLink.isVisible({ timeout: 5000 }).catch(() => false);
 
-    await popup.waitForTimeout(2000);
+    if (isPasswordLinkVisible) {
+      await usePasswordLink.click();
+      logger.info({ jobId }, '[AUTH] Step 3: Clicked "Use your password" link');
+      await popup.waitForTimeout(2000);
+    } else {
+      logger.info({ jobId }, '[AUTH] Step 3: Password link not visible — may be using password by default');
+    }
   } catch (err) {
-    await screenshotOnError('Step 3: Switch to password', popup);
-    throw new AuthenticationError('Step 3 failed: Could not switch to password option');
+    // If the check fails, continue — the page may have already advanced
+    logger.warn({ jobId }, '[AUTH] Step 3: Password gateway check failed — continuing');
   }
 
-  // ── Step 4: Enter Password inside the popup ─────────────────────────────────
+  // ── Step 4: Microsoft OAuth - Password ───────────────────────────────────────
   try {
-    const passwordInput = popup.locator('input[type="password"], input[name="passwd"]').first();
+    const passwordInput = popup.locator('input[type="password"], input[name="passwd"], #i0118').first();
     await passwordInput.waitFor({ timeout: 30_000 });
     await passwordInput.fill(APOLLO_PASSWORD);
-    logger.info({ jobId }, '[AUTH] Step 4: Filled password in popup');
+    logger.info({ jobId }, '[AUTH] Step 4: Filled password');
 
-    const signInButton = popup.locator('input[type="submit"], #idSIButton9').first();
+    const signInButton = popup.locator('button[type="submit"], #idSIButton9, input[type="submit"]').first();
     await signInButton.click();
     logger.info({ jobId }, '[AUTH] Step 4: Clicked Sign In');
 
@@ -150,18 +159,18 @@ async function performLogin(page: Page, jobId: string): Promise<void> {
     throw new AuthenticationError('Step 4 failed: Could not enter password on Microsoft IDP');
   }
 
-  // ── Step 5: Handle "Stay Signed In?" prompt — click "Yes" ───────────────────
+  // ── Step 5: Microsoft OAuth - KMSI (Keep Me Signed In) ─────────────────────
   try {
     const staySignedIn = popup.locator('#idSIButton9').first();
     await staySignedIn.waitFor({ timeout: 30_000 });
     await staySignedIn.click();
-    logger.info({ jobId }, '[AUTH] Step 5: Confirmed "Stay signed in" in popup');
+    logger.info({ jobId }, '[AUTH] Step 5: Confirmed "Stay signed in"');
   } catch (err) {
     // If the prompt doesn't appear, that's okay — continue
     logger.warn({ jobId }, '[AUTH] Step 5: "Stay signed in" prompt not detected — may have auto-advanced');
   }
 
-  // ── Step 6: Wait for popup to close ─────────────────────────────────────────
+  // ── Step 6: Wait for OAuth callback ─────────────────────────────────────────
   try {
     await Promise.race([
       popup.waitForEvent('close', { timeout: OAUTH_TIMEOUT_MS }),
@@ -173,27 +182,23 @@ async function performLogin(page: Page, jobId: string): Promise<void> {
     throw new AuthenticationError('Step 6 failed: OAuth redirect chain did not reach Apollo callback');
   }
 
-  // ── Step 7: Verify main page session — wait for redirect back to #/people ────
+  // ── Step 7: CRITICAL - Wait for #/people URL before saving session ──────────
+  // Do NOT navigate to #/people or save storageState until this URL matches
   try {
-    await Promise.any([
-      page.waitForURL(/apollo\.io\/api\/v1\/email_accounts\/ms_auth_callback/i, { timeout: OAUTH_TIMEOUT_MS }),
-      page.waitForURL(/app\.apollo\.io\/(#\/people|#\/home|\/?$)/i, { timeout: OAUTH_TIMEOUT_MS }),
-      page.waitForFunction(
-        () => window.location.href.includes('app.apollo.io/#/people'),
-        { timeout: OAUTH_TIMEOUT_MS },
-      ),
-    ]);
+    await page.waitForURL('**/app.apollo.io/#/people**', { timeout: OAUTH_TIMEOUT_MS });
+    await page.waitForLoadState('domcontentloaded', { timeout: OAUTH_TIMEOUT_MS });
+    await page.waitForLoadState('networkidle', { timeout: OAUTH_TIMEOUT_MS });
 
-    await page.waitForLoadState('domcontentloaded', { timeout: OAUTH_TIMEOUT_MS }).catch(() => undefined);
-    await page.waitForLoadState('networkidle', { timeout: OAUTH_TIMEOUT_MS }).catch(() => undefined);
+    // Verify session cookies are present
     await page.waitForFunction(
-      () => document.cookie.includes('_apollo') || document.cookie.includes('XSRF-TOKEN') || window.location.hostname.endsWith('apollo.io'),
+      () => document.cookie.includes('_apollo') || document.cookie.includes('XSRF-TOKEN'),
       { timeout: OAUTH_TIMEOUT_MS },
     );
-    logger.info({ jobId, url: page.url() }, '[AUTH] Step 7: Redirected back to Apollo with session cookies');
+
+    logger.info({ jobId, url: page.url() }, '[AUTH] Step 7: Confirmed redirect to #/people — session valid');
   } catch (err) {
-    await screenshotOnError('Step 7: Verify Apollo redirect', page);
-    throw new AuthenticationError('Step 7 failed: Did not redirect back to Apollo after SSO');
+    await screenshotOnError('Step 7: Verify #/people redirect', page);
+    throw new AuthenticationError('Step 7 failed: Did not redirect to #/people after SSO — session NOT saved');
   }
 
   logger.info({ jobId }, '[AUTH] Microsoft SSO flow completed successfully');
@@ -222,27 +227,21 @@ export class AuthManager {
 
     logger.info({ jobId }, 'No valid session — performing login flow');
 
-    const HOME_URL = 'https://app.apollo.io/';
+    const LOGIN_URL = 'https://app.apollo.io/#/login';
     const MAX_LOGIN_ATTEMPTS = 3;
 
     for (let attempt = 1; attempt <= MAX_LOGIN_ATTEMPTS; attempt++) {
       try {
-        // Navigate to Apollo home
-        await page.goto(HOME_URL, { waitUntil: 'domcontentloaded', timeout: OAUTH_TIMEOUT_MS });
-
-        // Wait for React app to initialize
-        await page.waitForTimeout(2000);
+        // Navigate directly to login page — do NOT navigate to #/people
+        await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: OAUTH_TIMEOUT_MS });
+        await page.waitForTimeout(2000); // Allow React to initialize
 
         const currentUrl = page.url();
+        logger.info({ jobId, attempt, url: currentUrl }, 'On login page');
 
-        // Check if redirected to login
-        if (currentUrl.includes('/login')) {
-          logger.info({ jobId, attempt }, 'Redirected to login page — performing login');
-          await performLogin(page, jobId);
-        } else {
-          // Already authenticated — session cookies were set by proxy or previous login
-          logger.info({ jobId }, 'Already authenticated — session is valid');
-        }
+        // Perform the Microsoft SSO flow — this handles all OAuth steps
+        // and waits for #/people URL before returning
+        await performLogin(page, jobId);
 
         // Wait for network to be idle (session cookies fully settled)
         await page.waitForLoadState('networkidle', { timeout: OAUTH_TIMEOUT_MS });
