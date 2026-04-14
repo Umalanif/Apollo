@@ -2,35 +2,35 @@
   "requestsFinished": 0,
   "requestsFailed": 1,
   "requestsRetries": 1,
-  "requestsFailedPerMinute": 1,
+  "requestsFailedPerMinute": 0,
   "requestsFinishedPerMinute": 0,
   "requestMinDurationMillis": null,
   "requestMaxDurationMillis": 0,
-  "requestTotalFailedDurationMillis": 13331,
+  "requestTotalFailedDurationMillis": 252259,
   "requestTotalFinishedDurationMillis": 0,
-  "crawlerStartedAt": "2026-04-14T05:23:30.338Z",
-  "crawlerFinishedAt": "2026-04-14T05:24:14.010Z",
-  "statsPersistedAt": "2026-04-14T05:24:14.010Z",
-  "crawlerRuntimeMillis": 43847,
-  "crawlerLastStartTimestamp": 1776144210163,
+  "crawlerStartedAt": "2026-04-14T06:46:18.807Z",
+  "crawlerFinishedAt": "2026-04-14T06:52:24.332Z",
+  "statsPersistedAt": "2026-04-14T06:52:24.332Z",
+  "crawlerRuntimeMillis": 365672,
+  "crawlerLastStartTimestamp": 1776149178660,
   "requestRetryHistogram": [
     null,
     null,
     1
   ],
   "statsId": 0,
-  "requestAvgFailedDurationMillis": 13331,
+  "requestAvgFailedDurationMillis": 252259,
   "requestAvgFinishedDurationMillis": null,
-  "requestTotalDurationMillis": 13331,
+  "requestTotalDurationMillis": 252259,
   "requestsTotal": 1,
   "requestsWithStatusCode": {
     "200": 2
   },
   "errors": {
-    "V:\\Scraping\\Apollo\\dist\\services\\auth.service.js:50:16": {
+    "V:\\Scraping\\Apollo\\dist\\crawler.js:171:27": {
       "missing error code": {
         "Error": {
-          "page.screenshot: Target crashed ": {
+          "Apollo people search response not observed within 180000ms": {
             "count": 1
           }
         }
@@ -38,19 +38,19 @@
     }
   },
   "retryErrors": {
-    "V:\\Scraping\\Apollo\\dist\\services\\auth.service.js:50:16": {
+    "V:\\Scraping\\Apollo\\node_modules\\@crawlee\\browser\\internals\\browser-crawler.js:369:19": {
       "missing error code": {
         "Error": {
-          "page.screenshot: Target page, context or browser has been closed": {
+          "Detected a session error, rotating session... ": {
             "count": 1
           }
         }
       }
     },
-    "V:\\Scraping\\Apollo\\node_modules\\@crawlee\\browser-pool\\browser-pool.js:405:19": {
+    "V:\\Scraping\\Apollo\\dist\\services\\auth.service.js:68:15": {
       "missing error code": {
-        "Error": {
-          "browserController.newPage() failed: LhndyDnLZ_RqPQ5XyQtWD": {
+        "AuthenticationError": {
+          "Microsoft password input did not appear": {
             "count": 1
           }
         }

@@ -6,6 +6,7 @@ const OAUTH_TIMEOUT_MS = 120_000;
 const STEP_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 250;
 const TRANSITION_DELAY_MS = 3_000;
+const NETWORK_SETTLE_TIMEOUT_MS = 10_000;
 
 const selectors = {
   microsoftButton: 'button[data-cta-variant="secondary"]:has-text("Log In with Microsoft")',
@@ -39,6 +40,10 @@ async function isVisible(page: Page, selector: string): Promise<boolean> {
   return page.locator(selector).first().isVisible().catch(() => false);
 }
 
+function isApolloAuthenticatedUrl(url: string): boolean {
+  return /app\.apollo\.io/i.test(url) && !/\/#\/login\b/i.test(url);
+}
+
 async function waitForAnyVisible(page: Page, selectorList: string[], timeoutMs: number): Promise<string> {
   const deadline = Date.now() + timeoutMs;
 
@@ -49,7 +54,7 @@ async function waitForAnyVisible(page: Page, selectorList: string[], timeoutMs: 
       }
     }
 
-    if (/app\.apollo\.io(?!.*\/login)/i.test(page.url())) {
+    if (isApolloAuthenticatedUrl(page.url())) {
       return 'apollo-redirect';
     }
 
@@ -173,6 +178,16 @@ async function handleStaySignedIn(page: Page, hooks: Hooks): Promise<void> {
   }
 }
 
+async function waitForApolloApp(page: Page): Promise<void> {
+  await page.waitForFunction(
+    () => /app\.apollo\.io/i.test(window.location.href) && !/\/#\/login\b/i.test(window.location.href),
+    undefined,
+    { timeout: OAUTH_TIMEOUT_MS },
+  );
+  await page.waitForLoadState('domcontentloaded').catch(() => undefined);
+  await page.waitForTimeout(2_000);
+}
+
 export async function runMicrosoftApolloLogin(page: Page, options: MicrosoftLoginOptions): Promise<void> {
   const { email, password, onStep, onRecoverableStepError } = options;
 
@@ -183,7 +198,7 @@ export async function runMicrosoftApolloLogin(page: Page, options: MicrosoftLogi
     waitUntil: 'domcontentloaded',
     timeout: OAUTH_TIMEOUT_MS,
   });
-  await page.waitForLoadState('networkidle').catch(() => undefined);
+  await page.waitForLoadState('networkidle', { timeout: NETWORK_SETTLE_TIMEOUT_MS }).catch(() => undefined);
   await onStep?.('open-login', 'Opened Apollo login page');
 
   await page.locator(selectors.microsoftButton).first().waitFor({ timeout: STEP_TIMEOUT_MS });
@@ -201,6 +216,7 @@ export async function runMicrosoftApolloLogin(page: Page, options: MicrosoftLogi
   );
 
   if (firstState === 'apollo-redirect') {
+    await waitForApolloApp(page);
     await onStep?.('apollo-redirect', `Redirected back to Apollo: ${page.url()}`);
     return;
   }
@@ -218,7 +234,6 @@ export async function runMicrosoftApolloLogin(page: Page, options: MicrosoftLogi
   await submitPassword(page, password, options);
   await handleStaySignedIn(page, { onStep, onRecoverableStepError });
 
-  await page.waitForURL(/app\.apollo\.io(?!.*\/login)/i, { timeout: OAUTH_TIMEOUT_MS });
-  await page.waitForLoadState('networkidle').catch(() => undefined);
+  await waitForApolloApp(page);
   await onStep?.('apollo-redirect', `Redirected back to Apollo: ${page.url()}`);
 }

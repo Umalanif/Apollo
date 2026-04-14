@@ -18,10 +18,13 @@ const BLOCKED_DOMAINS = new Set([
   'googlesyndication.com',
   'googleadservices.com',
   'facebook.com',
+  'hs-scripts.com',
+  'hubspot.com',
   'hotjar.com',
   'segment.com',
   'mixpanel.com',
   'intercom.io',
+  'intercomcdn.com',
   'sentry.io',
   '2o7.net',
   'omtrdc.net',
@@ -36,6 +39,7 @@ const BLOCKED_DOMAINS = new Set([
   'mousestats.com',
   'luckyorange.com',
   'clarity.ms',
+  'customer.io',
 ]);
 
 const BLOCKED_TYPES = new Set([
@@ -121,18 +125,7 @@ async function applyStealth(page: Page): Promise<void> {
       configurable: true,
     });
 
-    if (!isMicrosoftAuthHost) {
-      if ((globalThis as Record<string, unknown>).chrome === undefined) {
-        (globalThis as Record<string, unknown>).chrome = {};
-      }
-      Object.defineProperty(globalThis, 'chrome', {
-        get: () => ({
-          loadTimes: () => ({}),
-          csi: () => ({}),
-        }),
-        configurable: true,
-      });
-    }
+    void isMicrosoftAuthHost;
 
     const permissions = navigator.permissions as Permissions & {
       query?: (permissionDesc: PermissionDescriptor) => Promise<PermissionStatus>;
@@ -168,13 +161,19 @@ export async function configureApolloPage(page: Page): Promise<void> {
     const request = route.request();
     const url = request.url();
     const type = request.resourceType();
+    const parsedUrl = new URL(url);
+
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      await route.abort();
+      return;
+    }
 
     if (isMicrosoftAuthUrl(url) || url.includes('apollo.io')) {
       await route.continue();
       return;
     }
 
-    const hostname = new URL(url).hostname;
+    const hostname = parsedUrl.hostname;
     if (isBlockedDomain(hostname) || BLOCKED_TYPES.has(type)) {
       await route.abort();
       return;

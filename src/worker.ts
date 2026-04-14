@@ -5,6 +5,7 @@ import { solveRecaptcha } from './captcha-solver';
 import type { ChallengeDetection } from './challenge-detector';
 import { createCrawler } from './crawler';
 import { saveLead } from './db/db.service';
+import { getEnv } from './env/schema';
 import { AuthenticationError, ChallengeBypassSignal } from './errors';
 import { exportLeads } from './export';
 import { parseApolloPeopleResponse } from './leads-scraper';
@@ -113,7 +114,9 @@ async function run(): Promise<void> {
 
   try {
     const MAX_RETRIES = 3;
-    let proxyPort = 10_000;
+    const { PROXY_STICKY_PORT, PROXY_SESSION_KEY } = getEnv();
+    const proxyPort = PROXY_STICKY_PORT;
+    const proxySessionKey = `${PROXY_SESSION_KEY}-${data.jobId}`;
     let failCount = 0;
     let saved = 0;
 
@@ -176,6 +179,7 @@ async function run(): Promise<void> {
         activeCrawler = await createCrawler({
           jobId: data.jobId,
           proxyPort,
+          proxySessionKey,
           onChallengeDetected,
           onPeopleResponse,
         });
@@ -192,7 +196,7 @@ async function run(): Promise<void> {
           );
         }
 
-        logger.info({ jobId: data.jobId, saved }, 'Extraction completed successfully');
+        logger.info({ jobId: data.jobId, saved, proxyPort, proxySessionKey }, 'Extraction completed successfully');
         break;
       } catch (err) {
         if (err instanceof AuthenticationError) {
@@ -203,24 +207,18 @@ async function run(): Promise<void> {
 
         if (err instanceof ChallengeBypassSignal) {
           logger.warn(
-            { jobId: data.jobId, challengeType: err.challengeType, url: err.url, proxyPort },
-            'ChallengeBypassSignal — rotating proxy port',
+            { jobId: data.jobId, challengeType: err.challengeType, url: err.url, proxyPort, proxySessionKey },
+            'ChallengeBypassSignal on sticky proxy session',
           );
-          proxyPort++;
           failCount = 0;
-        } else {
-          const message = err instanceof Error ? err.message : String(err);
-          logger.error({ jobId: data.jobId, err: message }, 'Extraction error');
-          failCount++;
-          if (failCount >= MAX_RETRIES) {
-            logger.warn({ jobId: data.jobId, failCount }, 'Max failures reached — rotating proxy');
-            proxyPort++;
-            failCount = 0;
-          }
+          throw err;
         }
 
-        if (proxyPort > 65_535) {
-          throw new Error(`Proxy port exhausted for job ${data.jobId}`);
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error({ jobId: data.jobId, err: message, proxyPort, proxySessionKey }, 'Extraction error');
+        failCount++;
+        if (failCount >= MAX_RETRIES) {
+          throw new Error(`Extraction failed after ${failCount} attempts on sticky session ${proxySessionKey}`);
         }
       } finally {
         await teardownCrawler(activeCrawler);
