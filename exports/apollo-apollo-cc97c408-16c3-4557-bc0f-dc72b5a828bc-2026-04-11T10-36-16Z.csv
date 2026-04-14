@@ -1,4 +1,0 @@
-id,linkedInUrl,firstName,lastName,title,company,companyUrl,location,email,phone,createdAt,updatedAt
-b9ee57bf-8af7-49f2-a5a2-5fdd9d604075,https://www.linkedin.com/in/john-doe,Johnny,Doe,Senior Engineer,Acme Corp,https://acme.com,San Francisco,john@acme.com,+-555-0100,2026-04-11T08:06:56.681Z,2026-04-11T08:06:56.702Z
-19e16c62-a5cc-4cb2-aa45-1423b7c65ac5,https://www.linkedin.com/in/alice-wonder-001,Alice,Wonder,Engineering Manager,Wonderland Inc,https://wonderland.example.com,"London, UK",alice@wonderland.example.com,+4-20-7946-0001,2026-04-11T08:15:26.864Z,2026-04-11T08:15:26.864Z
-76135d57-29b0-4073-a431-9d87018d90eb,https://www.linkedin.com/in/bob-builder-002,Bob,Builder,CTO,BuildIt Ltd,https://buildit.example.com,"Manchester, UK",bob@buildit.example.com,+4-161-000-0002,2026-04-11T08:15:26.889Z,2026-04-11T08:15:26.889Z

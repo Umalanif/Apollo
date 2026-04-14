@@ -1,8 +1,5 @@
 /**
- * Structured JSON logger — Pino
- *
- * All log output is JSON (machine-parseable).
- * In worker_threads context, stdout/stderr are piped to parent process.
+ * Pino logger with pretty console output and file logging.
  */
 
 import pino from 'pino';
@@ -17,16 +14,27 @@ if (!existsSync(logsDir)) {
 
 export const logger = pino({
   level: process.env.LOG_LEVEL ?? 'info',
-  formatters: {
-    level: label => ({ level: label }),
-  },
   timestamp: pino.stdTimeFunctions.isoTime,
   transport: {
-    target: 'pino/file',
-    options: {
-      destination: join(process.cwd(), 'logs', 'combined.log'),
-      mkdir: true,
-    },
+    targets: [
+      {
+        target: 'pino-pretty',
+        level: process.env.LOG_LEVEL ?? 'info',
+        options: {
+          colorize: false,
+          ignore: 'pid,hostname',
+          translateTime: 'SYS:standard',
+        },
+      },
+      {
+        target: 'pino/file',
+        level: process.env.LOG_LEVEL ?? 'info',
+        options: {
+          destination: join(process.cwd(), 'logs', 'combined.log'),
+          mkdir: true,
+        },
+      },
+    ],
   },
 });
 

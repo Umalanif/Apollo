@@ -1,7 +1,5 @@
-import { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
 import { LeadSchema } from '../env/schema';
-
-const prisma = new PrismaClient();
 
 export interface SaveLeadResult {
   success: true;
@@ -21,7 +19,7 @@ export interface SaveLeadResult {
   };
 }
 
-export async function saveLead(jobId: string, raw: unknown): Promise<SaveLeadResult> {
+export async function saveLead(prisma: PrismaClient, jobId: string, raw: unknown): Promise<SaveLeadResult> {
   const parse = LeadSchema.safeParse(raw);
   if (!parse.success) {
     const log = {

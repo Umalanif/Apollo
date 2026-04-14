@@ -1,35 +1,15 @@
-/**
- * Apollo Worker — Bree worker_threads context
- *
- * Receives job payload via parentPort (Bree workerData).
- * Runs extraction loop, persists leads via db.service,
- * then exports results to timestamped .csv/.xlsx.
- *
- * Phase 7.4: onChallengeDetected → reCAPTCHA sitekey → 2captcha-ts → token → inject
- * Phase 7.5/7.6: Cloudflare/DataDome → ChallengeBypassSignal → rotate proxy + re-hydrate
- *
- * Usage (Bree config):
- *   new Worker('./dist/worker.js', { workerData: { jobId, targeting } })
- *
- * Communication back to parent:
- *   parentPort.postMessage({ type: 'progress', payload: { collected, saved } })
- *   parentPort.postMessage({ type: 'done', payload: { exportedAt, filePaths } })
- *   parentPort.postMessage({ type: 'error', payload: { message, stack } })
- */
-
-import { parentPort, workerData } from 'worker_threads';
-import type { Page } from 'playwright';
 import { PrismaClient } from '@prisma/client';
-import { saveLead } from './db/db.service';
-import { exportLeads } from './export';
-import { logger } from './logger';
-import { createCrawler } from './crawler';
-import { ChallengeDetection } from './challenge-detector';
+import type { Page } from 'playwright';
+import { parentPort, workerData } from 'worker_threads';
 import { solveRecaptcha } from './captcha-solver';
-import { ChallengeBypassSignal, AuthenticationError } from './errors';
-import { scrapeLeadsFromPage } from './leads-scraper';
-
-// ── Types ─────────────────────────────────────────────────────────────────────
+import type { ChallengeDetection } from './challenge-detector';
+import { createCrawler } from './crawler';
+import { saveLead } from './db/db.service';
+import { AuthenticationError, ChallengeBypassSignal } from './errors';
+import { exportLeads } from './export';
+import { parseApolloPeopleResponse } from './leads-scraper';
+import { logger } from './logger';
+import { APOLLO_LOGIN_URL } from './apollo-browser';
 
 interface WorkerData {
   jobId: string;
@@ -58,71 +38,87 @@ interface ErrorMessage {
 
 type OutgoingMessage = ProgressMessage | DoneMessage | ErrorMessage;
 
-// ── Prisma ───────────────────────────────────────────────────────────────────
-
-const prisma = new PrismaClient();
-
-// ── Message helper ────────────────────────────────────────────────────────────
-
 function post(msg: OutgoingMessage): void {
   parentPort?.postMessage(msg);
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────────
+function buildPeopleSearchUrl(targeting: WorkerData['targeting']): string {
+  const params = new URLSearchParams();
 
-// PHASE 20.1: AUTH DRY RUN — stop after 1 lead to validate Microsoft SSO flow
-const DRY_RUN = true;
-let dryRunDone = false;
+  for (const keyword of targeting.keywords ?? []) {
+    params.append('search[keywords][]', keyword);
+  }
+
+  for (const title of targeting.titles ?? []) {
+    params.append('search[person_titles][]', title);
+  }
+
+  for (const location of targeting.locations ?? []) {
+    params.append('search[person_locations][]', location);
+  }
+
+  for (const company of targeting.companies ?? []) {
+    params.append('search[organization_names][]', company);
+  }
+
+  const query = params.toString();
+  return `https://app.apollo.io/#/people${query ? `?${query}` : ''}`;
+}
+
+async function teardownCrawler(crawler: Awaited<ReturnType<typeof createCrawler>> | null): Promise<void> {
+  if (!crawler) {
+    return;
+  }
+
+  try {
+    await crawler.teardown();
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'Crawler teardown failed');
+  }
+}
 
 async function run(): Promise<void> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let data: WorkerData = workerData as WorkerData;
+  const prisma = new PrismaClient();
+  let activeCrawler: Awaited<ReturnType<typeof createCrawler>> | null = null;
+  let shuttingDown = false;
+  const data = workerData as WorkerData;
 
-  // Standalone mode (no parentPort) — duplicate critical logs to console
-  if (!parentPort) {
-    console.error('[STANDALONE] No parentPort detected — running in debug mode');
-    console.error('[STANDALONE] workerData:', JSON.stringify(data));
-  }
-
-  // PHASE 20.1: Use a default jobId for standalone DRY_RUN
-  if (!data?.jobId) {
-    if (DRY_RUN) {
-      data = { jobId: 'dry-run-auth', targeting: {} };
-      console.error('[STANDALONE DRY RUN] Using default jobId: dry-run-auth');
-    } else {
-      logger.error({ err: 'workerData.jobId is required' }, 'Invalid worker data');
-      console.error('[STANDALONE ERROR] workerData.jobId is required — bailing out');
-      post({ type: 'error', payload: { message: 'workerData.jobId is required' } });
+  const shutdown = async (signal?: NodeJS.Signals): Promise<void> => {
+    if (shuttingDown) {
       return;
     }
+    shuttingDown = true;
+    logger.info({ jobId: data?.jobId, signal }, 'Worker shutdown started');
+    await teardownCrawler(activeCrawler);
+    await prisma.$disconnect();
+  };
+
+  process.once('SIGINT', () => {
+    void shutdown('SIGINT').then(() => process.exit(0));
+  });
+  process.once('SIGTERM', () => {
+    void shutdown('SIGTERM').then(() => process.exit(0));
+  });
+
+  if (!data?.jobId) {
+    const message = 'workerData.jobId is required';
+    logger.error({ err: message }, 'Invalid worker data');
+    post({ type: 'error', payload: { message } });
+    await shutdown();
+    return;
   }
 
-  logger.info({ jobId: data?.jobId, targeting: data?.targeting }, 'Worker started');
-
+  logger.info({ jobId: data.jobId, targeting: data.targeting }, 'Worker started');
   post({ type: 'progress', payload: { collected: 0, saved: 0 } });
 
   try {
-    // ── Phase 7.4-7.6: Extraction loop with CAPTCHA + proxy rotation ────────
-    // Retry loop:
-    //   - reCAPTCHA  → solve via 2captcha, inject token, reset fail counter
-    //   - Cloudflare / DataDome / generic_block → throw ChallengeBypassSignal → rotate port
-    //   - 401/403 / network error → increment fail counter, rotate after x3
-
-    const MAX_RETRIES = 3; // Phase 7.5: rotate proxy after 3 failures
+    const MAX_RETRIES = 3;
     let proxyPort = 10_000;
     let failCount = 0;
     let saved = 0;
 
-    // eslint-disable-next-line no-constant-condition
     while (true) {
-      let crawler: Awaited<ReturnType<typeof createCrawler>> | null = null;
-
       try {
-        logger.info({ jobId: data.jobId, proxyPort }, 'Creating PlaywrightCrawler');
-
-        // ── Build onChallengeDetected callback ─────────────────────────────────
-        // This runs INSIDE the crawler's requestHandler, after detectChallenge(page).
-        // `page` is available here for token injection.
         const onChallengeDetected = async (
           detection: ChallengeDetection,
           url: string,
@@ -133,113 +129,72 @@ async function run(): Promise<void> {
             `Challenge detected: ${detection.message}`,
           );
 
-          if (detection.type === 'recaptcha') {
-            const sitekey = detection.sitekey;
-            if (!sitekey) {
-              // No sitekey → can't solve → signal proxy rotation
-              throw new ChallengeBypassSignal('recaptcha', url);
-            }
-
-            logger.info(
-              { jobId: data.jobId, sitekey: sitekey.slice(0, 10) + '…' },
-              'Solving reCAPTCHA via 2captcha',
-            );
-
-            // solveRecaptcha already has internal retry logic (x3)
-            const token = await solveRecaptcha(sitekey, url);
-
-            // Inject token into browser context
-            await page.evaluate((t: string) => {
-              const win = window as unknown as Record<string, unknown>;
-
-              // 1. Standard global callback if the page uses one
-              if (typeof win.__recaptchaCallback === 'function') {
-                (win.__recaptchaCallback as (token: string) => void)(t);
-              }
-
-              // 2. Invisible reCAPTCHA textarea (v2 checkbox / enterprise)
-              const ta1 = document.querySelector<HTMLTextAreaElement>('#g-recaptcha-response');
-              if (ta1) ta1.value = t;
-
-              // 3. Data-sitekey attribute form field
-              const ta2 = document.querySelector<HTMLTextAreaElement>('[name="g-recaptcha-response-data"]');
-              if (ta2) ta2.value = t;
-
-              // 4. Dispatch event for page's own listeners
-              document.dispatchEvent(new CustomEvent('recaptcha-token-ready', { detail: { token: t } }));
-            }, token);
-
-            logger.info({ jobId: data.jobId }, 'reCAPTCHA token injected — page should auto-submit');
-            failCount = 0; // successful solve resets counter
-          } else {
-            // Cloudflare, DataDome, generic_block → signal proxy rotation
+          if (detection.type !== 'recaptcha') {
             throw new ChallengeBypassSignal(detection.type ?? 'unknown', url);
           }
+
+          if (!detection.sitekey) {
+            throw new ChallengeBypassSignal('recaptcha', url);
+          }
+
+          const token = await solveRecaptcha(detection.sitekey, url);
+          await page.evaluate((captchaToken: string) => {
+            const textarea = document.querySelector<HTMLTextAreaElement>('#g-recaptcha-response');
+            if (textarea) {
+              textarea.value = captchaToken;
+            }
+
+            document.dispatchEvent(new CustomEvent('recaptcha-token-ready', {
+              detail: { token: captchaToken },
+            }));
+          }, token);
+
+          failCount = 0;
         };
 
-        // ── onPageReady: extract leads from the live page before crawler teardown
-        const onPageReady = async (page: Page, url: string): Promise<void> => {
-          logger.debug({ jobId: data.jobId, url }, 'Running onPageReady extraction');
+        const onPeopleResponse = async (payload: unknown, page: Page, url: string): Promise<void> => {
+          logger.debug({ jobId: data.jobId, url, currentUrl: page.url() }, 'Processing intercepted Apollo response');
 
-          const rawLeads = await scrapeLeadsFromPage(page, data.jobId);
-
-          for (const raw of rawLeads) {
-            if (DRY_RUN && dryRunDone) break;
+          const leads = parseApolloPeopleResponse(data.jobId, payload);
+          for (const lead of leads) {
             try {
-              await saveLead(data.jobId, raw);
+              await saveLead(prisma, data.jobId, lead);
               saved++;
-              dryRunDone = true;
-              logger.debug({ jobId: data.jobId, linkedInUrl: raw.linkedInUrl }, 'Lead saved');
-
-              // PHASE 20.1: AUTH VERIFICATION HOOK — log and pause for human verification
-              logger.info('[AUTH CHECK] Successfully reached People Dashboard.');
-              logger.info('[AUTH CHECK] Current URL: ' + page.url());
-              logger.info('[AUTH CHECK] Pausing 10 seconds for visual confirmation...');
-              await page.waitForTimeout(10_000);
-              logger.info('[AUTH CHECK] Dry run complete — shutting down gracefully.');
             } catch (err) {
-              // saveLead already logs invalid parse as warn; other errors: log and continue
               if (err instanceof Error && !err.message.includes('Invalid lead data')) {
                 logger.warn(
-                  { jobId: data.jobId, err: err.message, linkedInUrl: raw.linkedInUrl },
-                  'saveLead error — continuing',
+                  { jobId: data.jobId, err: err.message, linkedInUrl: lead.linkedInUrl },
+                  'saveLead error',
                 );
               }
             }
-            if (DRY_RUN && dryRunDone) break;
           }
 
-          post({ type: 'progress', payload: { collected: rawLeads.length, saved } });
+          post({ type: 'progress', payload: { collected: leads.length, saved } });
         };
 
-        // ── Create + run crawler ──────────────────────────────────────────────
-        crawler = await createCrawler({
+        activeCrawler = await createCrawler({
           jobId: data.jobId,
           proxyPort,
           onChallengeDetected,
-          onPageReady,
+          onPeopleResponse,
         });
 
-        // Phase 8: SPA hash routing — use #/people so Apollo's router processes the URL
-        const result = await crawler.run([{
-          url: 'https://app.apollo.io/#/people?search[title]=engineer&search[locations][]=United+States',
+        const targetUrl = buildPeopleSearchUrl(data.targeting);
+        const result = await activeCrawler.run([{
+          url: APOLLO_LOGIN_URL,
+          uniqueKey: `${data.jobId}:apollo-login`,
+          userData: { targetUrl },
         }]);
-
-        // crawler.run() resolves even when requests fail (only rejects on queue timeout).
-        // If requestsFailed > 0 or no requests finished, treat as extraction failure so the
-        // retry loop can rotate proxy and try again.
-        const { requestsFinished, requestsFailed } = result;
-        if (requestsFailed > 0 || requestsFinished === 0) {
+        if (result.requestsFailed > 0 || result.requestsFinished === 0) {
           throw new Error(
-            `Extraction failed: ${requestsFinished} finished, ${requestsFailed} failed for job ${data.jobId}`,
+            `Extraction failed: ${result.requestsFinished} finished, ${result.requestsFailed} failed for job ${data.jobId}`,
           );
         }
 
         logger.info({ jobId: data.jobId, saved }, 'Extraction completed successfully');
         break;
-
       } catch (err) {
-        // AuthenticationError is fatal — do not rotate proxy, stop immediately
         if (err instanceof AuthenticationError) {
           logger.error({ jobId: data.jobId, err: err.message }, 'FATAL: AUTH_FAILED');
           post({ type: 'error', payload: { message: err.message } });
@@ -247,18 +202,15 @@ async function run(): Promise<void> {
         }
 
         if (err instanceof ChallengeBypassSignal) {
-          const challengeType = err.challengeType;
-          const url = err.url;
           logger.warn(
-            { jobId: data.jobId, challengeType, url, proxyPort },
+            { jobId: data.jobId, challengeType: err.challengeType, url: err.url, proxyPort },
             'ChallengeBypassSignal — rotating proxy port',
           );
           proxyPort++;
           failCount = 0;
         } else {
-          const msg = err instanceof Error ? err.message : String(err);
-          logger.error({ jobId: data.jobId, err: msg }, 'Extraction error');
-
+          const message = err instanceof Error ? err.message : String(err);
+          logger.error({ jobId: data.jobId, err: message }, 'Extraction error');
           failCount++;
           if (failCount >= MAX_RETRIES) {
             logger.warn({ jobId: data.jobId, failCount }, 'Max failures reached — rotating proxy');
@@ -268,26 +220,16 @@ async function run(): Promise<void> {
         }
 
         if (proxyPort > 65_535) {
-          throw new Error(`Proxy port exhausted — all ports used for job ${data.jobId}`);
+          throw new Error(`Proxy port exhausted for job ${data.jobId}`);
         }
-
-        continue;
       } finally {
-        if (crawler) {
-          try {
-            await crawler.teardown();
-          } catch {
-            // non-fatal teardown error
-          }
-        }
+        await teardownCrawler(activeCrawler);
+        activeCrawler = null;
       }
     }
 
-    // ── Export results from DB ─────────────────────────────────────────────
-    const filePaths = await exportLeads(data.jobId);
-
+    const filePaths = await exportLeads(prisma, data.jobId);
     logger.info({ jobId: data.jobId, saved, filePaths }, 'Export completed');
-
     post({
       type: 'done',
       payload: { exportedAt: new Date().toISOString(), filePaths },
@@ -298,8 +240,8 @@ async function run(): Promise<void> {
     logger.error({ err: message, stack }, 'Worker failed');
     post({ type: 'error', payload: { message, stack } });
   } finally {
-    await prisma.$disconnect();
+    await shutdown();
   }
 }
 
-run();
+void run();

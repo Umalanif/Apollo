@@ -1,9 +1,0 @@
-{
-	"id": "77UXm1Rifmz7vAZ",
-	"json": "{\"id\":\"77UXm1Rifmz7vAZ\",\"url\":\"https://app.apollo.io/#/people?search[title]=engineer&search[locations][]=United+States\",\"loadedUrl\":\"https://app.apollo.io/#/login?redirectTo=https%3A%2F%2Fapp.apollo.io%2F%23%2Fpeople%3Fsearch%5Btitle%5D%3Dengineer%26search%5Blocations%5D%5B%5D%3DUnited%2BStates\",\"uniqueKey\":\"https://app.apollo.io\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"__crawlee\":{\"state\":4}},\"handledAt\":\"2026-04-12T19:09:23.747Z\"}",
-	"method": "GET",
-	"orderNo": null,
-	"retryCount": 0,
-	"uniqueKey": "https://app.apollo.io",
-	"url": "https://app.apollo.io/#/people?search[title]=engineer&search[locations][]=United+States"
-}

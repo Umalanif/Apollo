@@ -1,25 +1,13 @@
-/**
- * Export utility — reads leads from SQLite via Prisma,
- * writes timestamped .csv and .xlsx using fast-csv + exceljs.
- *
- * Fault tolerance: reads directly from DB, not in-memory arrays.
- * If export fails mid-write, CSV may be incomplete but DB is source of truth.
- */
-
+import type { PrismaClient } from '@prisma/client';
+import type { Row } from '@fast-csv/format';
+import { mkdir } from 'node:fs/promises';
 import { format } from 'node:path';
-import { PrismaClient } from '@prisma/client';
-import { writeToPath } from 'fast-csv';
 import ExcelJS from 'exceljs';
 import filenamify from 'filenamify';
-import { mkdir } from 'node:fs/promises';
-import type { Row } from '@fast-csv/format';
+import { writeToPath } from 'fast-csv';
 import { logger } from './logger';
 
-const prisma = new PrismaClient();
-
 const EXPORT_DIR = './exports';
-
-// ── Column definitions ───────────────────────────────────────────────────────
 
 const COLUMNS = [
   { header: 'ID', key: 'id', width: 36 },
@@ -36,25 +24,24 @@ const COLUMNS = [
   { header: 'Updated At', key: 'updatedAt', width: 28 },
 ] as const;
 
-// ── Timestamp ─────────────────────────────────────────────────────────────────
-
 function timestamp(): string {
-  // ISO 8601, colon-free for Windows compatibility
   return new Date().toISOString().replace(/:/g, '-').replace(/\.\d{3}Z$/, 'Z');
 }
 
-// ── CSV export ─────────────────────────────────────────────────────────────────
+async function fetchLeads(prisma: PrismaClient, jobId: string) {
+  return prisma.lead.findMany({
+    where: { jobId },
+    orderBy: { createdAt: 'asc' },
+  });
+}
 
-async function writeCsv(jobId: string, timestampStr: string): Promise<string> {
+async function writeCsv(prisma: PrismaClient, jobId: string, timestampStr: string): Promise<string> {
   const filename = filenamify(`apollo-${jobId}-${timestampStr}.csv`);
   const filePath = format({ dir: EXPORT_DIR, base: filename });
 
   await mkdir(EXPORT_DIR, { recursive: true });
 
-  const leads = await prisma.lead.findMany({
-    orderBy: { createdAt: 'asc' },
-  });
-
+  const leads = await fetchLeads(prisma, jobId);
   const rows: Row[] = leads.map(lead => ({
     id: lead.id,
     linkedInUrl: lead.linkedInUrl,
@@ -74,18 +61,13 @@ async function writeCsv(jobId: string, timestampStr: string): Promise<string> {
   return filePath;
 }
 
-// ── XLSX export ───────────────────────────────────────────────────────────────
-
-async function writeXlsx(jobId: string, timestampStr: string): Promise<string> {
+async function writeXlsx(prisma: PrismaClient, jobId: string, timestampStr: string): Promise<string> {
   const filename = filenamify(`apollo-${jobId}-${timestampStr}.xlsx`);
   const filePath = format({ dir: EXPORT_DIR, base: filename });
 
   await mkdir(EXPORT_DIR, { recursive: true });
 
-  const leads = await prisma.lead.findMany({
-    orderBy: { createdAt: 'asc' },
-  });
-
+  const leads = await fetchLeads(prisma, jobId);
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Apollo Scraper';
   workbook.created = new Date();
@@ -114,29 +96,21 @@ async function writeXlsx(jobId: string, timestampStr: string): Promise<string> {
   return filePath;
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
-
-export async function exportLeads(jobId: string): Promise<string[]> {
+export async function exportLeads(prisma: PrismaClient, jobId: string): Promise<string[]> {
   const ts = timestamp();
   const paths: string[] = [];
 
   try {
-    paths.push(await writeCsv(jobId, ts));
+    paths.push(await writeCsv(prisma, jobId, ts));
   } catch (err) {
     logger.error({ err: err instanceof Error ? err.message : String(err), format: 'csv' }, 'CSV export failed');
   }
 
   try {
-    paths.push(await writeXlsx(jobId, ts));
+    paths.push(await writeXlsx(prisma, jobId, ts));
   } catch (err) {
     logger.error({ err: err instanceof Error ? err.message : String(err), format: 'xlsx' }, 'XLSX export failed');
   }
 
   return paths;
-}
-
-// ── Module-level disconnect helper ───────────────────────────────────────────
-
-export async function disconnect(): Promise<void> {
-  await prisma.$disconnect();
 }

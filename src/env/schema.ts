@@ -1,5 +1,5 @@
-import { z } from 'zod';
 import { config } from 'dotenv';
+import { z } from 'zod';
 
 config();
 
@@ -38,8 +38,26 @@ const EnvSchema = z.object({
   PROXY_USERNAME: z.string().min(1, 'PROXY_USERNAME is required'),
   PROXY_PASSWORD: z.string().min(1, 'PROXY_PASSWORD is required'),
   TWO_CAPTCHA_API_KEY: z.string().min(1, 'TWO_CAPTCHA_API_KEY is required'),
-  APOLLO_EMAIL: z.string().email('APOLLO_EMAIL must be a valid email'),
-  APOLLO_PASSWORD: z.string().min(1, 'APOLLO_PASSWORD is required'),
+  APOLLO_EMAIL: z.string().email('APOLLO_EMAIL must be a valid email').optional(),
+  APOLLO_PASSWORD: z.string().min(1, 'APOLLO_PASSWORD is required').optional(),
+  APOLLO_MS_EMAIL: z.string().email('APOLLO_MS_EMAIL must be a valid email').optional(),
+  APOLLO_MS_PASSWORD: z.string().min(1, 'APOLLO_MS_PASSWORD is required').optional(),
+}).superRefine((env, ctx) => {
+  if (!(env.APOLLO_MS_EMAIL ?? env.APOLLO_EMAIL)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['APOLLO_MS_EMAIL'],
+      message: 'APOLLO_MS_EMAIL or APOLLO_EMAIL is required',
+    });
+  }
+
+  if (!(env.APOLLO_MS_PASSWORD ?? env.APOLLO_PASSWORD)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['APOLLO_MS_PASSWORD'],
+      message: 'APOLLO_MS_PASSWORD or APOLLO_PASSWORD is required',
+    });
+  }
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -65,4 +83,12 @@ export function getEnv(): Env {
     return validateEnv();
   }
   return envInstance;
+}
+
+export function getMicrosoftCredentials(): { email: string; password: string } {
+  const env = getEnv();
+  return {
+    email: env.APOLLO_MS_EMAIL ?? env.APOLLO_EMAIL ?? '',
+    password: env.APOLLO_MS_PASSWORD ?? env.APOLLO_PASSWORD ?? '',
+  };
 }

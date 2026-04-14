@@ -1,29 +1,60 @@
 {
-  "requestsFinished": 1,
-  "requestsFailed": 0,
-  "requestsRetries": 0,
-  "requestsFailedPerMinute": 0,
-  "requestsFinishedPerMinute": 3,
-  "requestMinDurationMillis": 17936,
-  "requestMaxDurationMillis": 17936,
-  "requestTotalFailedDurationMillis": 0,
-  "requestTotalFinishedDurationMillis": 17936,
-  "crawlerStartedAt": "2026-04-12T19:09:05.165Z",
-  "crawlerFinishedAt": "2026-04-12T19:09:24.046Z",
-  "statsPersistedAt": "2026-04-12T19:09:24.046Z",
-  "crawlerRuntimeMillis": 19201,
-  "crawlerLastStartTimestamp": 1776020944845,
+  "requestsFinished": 0,
+  "requestsFailed": 1,
+  "requestsRetries": 1,
+  "requestsFailedPerMinute": 1,
+  "requestsFinishedPerMinute": 0,
+  "requestMinDurationMillis": null,
+  "requestMaxDurationMillis": 0,
+  "requestTotalFailedDurationMillis": 13331,
+  "requestTotalFinishedDurationMillis": 0,
+  "crawlerStartedAt": "2026-04-14T05:23:30.338Z",
+  "crawlerFinishedAt": "2026-04-14T05:24:14.010Z",
+  "statsPersistedAt": "2026-04-14T05:24:14.010Z",
+  "crawlerRuntimeMillis": 43847,
+  "crawlerLastStartTimestamp": 1776144210163,
   "requestRetryHistogram": [
+    null,
+    null,
     1
   ],
   "statsId": 0,
-  "requestAvgFailedDurationMillis": null,
-  "requestAvgFinishedDurationMillis": 17936,
-  "requestTotalDurationMillis": 17936,
+  "requestAvgFailedDurationMillis": 13331,
+  "requestAvgFinishedDurationMillis": null,
+  "requestTotalDurationMillis": 13331,
   "requestsTotal": 1,
   "requestsWithStatusCode": {
-    "200": 1
+    "200": 2
   },
-  "errors": {},
-  "retryErrors": {}
+  "errors": {
+    "V:\\Scraping\\Apollo\\dist\\services\\auth.service.js:50:16": {
+      "missing error code": {
+        "Error": {
+          "page.screenshot: Target crashed ": {
+            "count": 1
+          }
+        }
+      }
+    }
+  },
+  "retryErrors": {
+    "V:\\Scraping\\Apollo\\dist\\services\\auth.service.js:50:16": {
+      "missing error code": {
+        "Error": {
+          "page.screenshot: Target page, context or browser has been closed": {
+            "count": 1
+          }
+        }
+      }
+    },
+    "V:\\Scraping\\Apollo\\node_modules\\@crawlee\\browser-pool\\browser-pool.js:405:19": {
+      "missing error code": {
+        "Error": {
+          "browserController.newPage() failed: LhndyDnLZ_RqPQ5XyQtWD": {
+            "count": 1
+          }
+        }
+      }
+    }
+  }
 }
