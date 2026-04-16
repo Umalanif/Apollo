@@ -1,19 +1,11 @@
-/**
- * Apollo API Server
- *
- * Phase 9: Fastify + Bree orchestration layer.
- * POST /api/jobs/apollo — accepts targeting filters, returns 202 Accepted immediately.
- * Bree worker runs extraction asynchronously in worker_threads.
- */
-
-import Fastify from 'fastify';
-import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-type-provider-zod';
-import Bree from 'bree';
-import path from 'path';
-import { z } from 'zod';
+import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-
-// ── Job targeting schema ─────────────────────────────────────────────────────
+import Fastify from 'fastify';
+import type { WorkerOptions } from 'node:worker_threads';
+import Bree from 'bree';
+import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-type-provider-zod';
+import { z } from 'zod';
+import { logger } from './logger';
 
 const TargetingSchema = z.object({
   keywords: z.array(z.string()).optional(),
@@ -28,92 +20,125 @@ const CreateJobBodySchema = z.object({
 
 export type CreateJobInput = z.infer<typeof CreateJobBodySchema>;
 
-// ── Fastify ───────────────────────────────────────────────────────────────────
+function resolveWorkerRuntime(): { workerPath: string; workerOptions: WorkerOptions; acceptedExtensions: string[] } {
+  const isTypeScriptRuntime = path.extname(__filename) === '.ts';
 
-export const fastify = Fastify({
-  logger: {
-    level: 'info',
-  },
-});
+  if (isTypeScriptRuntime) {
+    return {
+      workerPath: path.join(__dirname, 'worker.ts'),
+      workerOptions: {
+        execArgv: ['--import', 'tsx'],
+      },
+      acceptedExtensions: ['.js', '.mjs', '.ts'],
+    };
+  }
 
-fastify.setValidatorCompiler(validatorCompiler);
-fastify.setSerializerCompiler(serializerCompiler);
+  return {
+    workerPath: path.join(__dirname, 'worker.js'),
+    workerOptions: {},
+    acceptedExtensions: ['.js', '.mjs'],
+  };
+}
 
-// ── Bree ─────────────────────────────────────────────────────────────────────
+function createApolloWorkerJob(input: CreateJobInput, jobId: string) {
+  const runtime = resolveWorkerRuntime();
 
-export const bree = new Bree({
-  logger: false, // Fastify handles logging
-  root: false,
-  jobs: [
+  return {
+    name: 'apollo-worker',
+    path: runtime.workerPath,
+    worker: {
+      ...runtime.workerOptions,
+      workerData: {
+        jobId,
+        targeting: input.targeting,
+      },
+    },
+  };
+}
+
+export function createApp() {
+  const runtime = resolveWorkerRuntime();
+
+  const fastify = Fastify({
+    logger,
+  });
+
+  fastify.setValidatorCompiler(validatorCompiler);
+  fastify.setSerializerCompiler(serializerCompiler);
+
+  const bree = new Bree({
+    logger: false,
+    root: false,
+    acceptedExtensions: runtime.acceptedExtensions,
+    worker: runtime.workerOptions,
+    workerMessageHandler: ({ name, message, worker }) => {
+      fastify.log.info({ workerName: name, worker, message }, 'Worker message received');
+    },
+    errorHandler: (error, data) => {
+      fastify.log.error({ err: error, worker: data.worker, workerName: data.name }, 'Bree worker failed');
+    },
+  });
+
+  const typed = fastify.withTypeProvider<ZodTypeProvider>();
+
+  typed.post<{ Body: CreateJobInput }>(
+    '/api/jobs/apollo',
     {
-      name: 'apollo-worker',
-      path: path.join(__dirname, '../dist/worker.js'),
-      timeout: false, // no timeout — extraction is open-ended
-      interval: false,
+      schema: {
+        body: CreateJobBodySchema,
+      },
     },
-  ],
-});
+    async (request, reply) => {
+      const jobId = `apollo-${randomUUID()}`;
 
-// ── Routes ────────────────────────────────────────────────────────────────────
+      await bree.remove('apollo-worker').catch(() => undefined);
+      await bree.add(createApolloWorkerJob(request.body, jobId));
 
-const typed = fastify.withTypeProvider<ZodTypeProvider>();
-
-typed.post<{ Body: CreateJobInput }>(
-  '/api/jobs/apollo',
-  {
-    schema: {
-      body: CreateJobBodySchema,
-    },
-  },
-  async (request, reply) => {
-    const { targeting } = request.body;
-    const jobId = `apollo-${randomUUID()}`;
-
-    // Remove any previous instance before re-adding — keeps jobs array clean (single entry)
-    await bree.remove('apollo-worker').catch(() => { /* ignore if not found */ });
-
-    // Dynamically set workerData and run the worker
-    await bree.add({
-      name: 'apollo-worker',
-      path: path.join(__dirname, '../dist/worker.js'),
-      worker: { workerData: { jobId, targeting } },
-    });
-
-    bree
-      .run('apollo-worker')
-      .catch((err: unknown) => {
+      void bree.run('apollo-worker').catch((err: unknown) => {
         fastify.log.error({ err, jobId }, 'Bree worker start failed');
       });
 
-    return reply.status(202).send({ jobId, status: 'accepted' });
-  },
-);
+      return reply.status(202).send({ jobId, status: 'accepted' });
+    },
+  );
 
-typed.get('/health', async () => ({ status: 'ok' }));
+  typed.get('/health', async () => ({ status: 'ok' }));
 
-// ── Start ─────────────────────────────────────────────────────────────────────
+  let started = false;
 
-export async function startServer(port = 3000): Promise<typeof fastify> {
-  await bree.start();
-  await fastify.listen({ port, host: '0.0.0.0' });
-  fastify.log.info(`Apollo server listening on port ${port}`);
-  return fastify;
+  async function start(port = 3000): Promise<void> {
+    if (started) {
+      return;
+    }
+
+    await bree.start();
+    await fastify.listen({ port, host: '0.0.0.0' });
+    fastify.log.info(
+      {
+        port,
+        workerPath: runtime.workerPath,
+        workerRuntime: path.extname(runtime.workerPath),
+      },
+      'Apollo server started',
+    );
+    started = true;
+  }
+
+  async function stop(): Promise<void> {
+    if (!started) {
+      return;
+    }
+
+    fastify.log.info('Apollo shutdown started');
+    await fastify.close();
+    await bree.stop();
+    started = false;
+  }
+
+  return {
+    fastify,
+    bree,
+    start,
+    stop,
+  };
 }
-
-// ── Graceful shutdown ─────────────────────────────────────────────────────────
-
-async function shutdown(): Promise<void> {
-  fastify.log.info('Shutting down...');
-  await fastify.close();
-  await bree.stop();
-  process.exit(0);
-}
-
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
-
-// ── Self-start when run directly ─────────────────────────────────────────────
-startServer(3000).catch((err) => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});

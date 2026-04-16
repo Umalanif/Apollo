@@ -6,8 +6,13 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "npm run build && tsx watch src/server.ts",
-    "worker": "tsx src/worker.ts",
+    "dev": "npm run build && tsx watch src/index.ts",
+    "worker": "tsx src/worker-cli.ts",
+    "smoke": "tsx src/smokeTest.ts",
+    "debug:egress": "tsx src/debug-egress.ts",
+    "debug:trust": "tsx src/debug-trust.ts",
+    "test:turnstile": "tsx --test src/challenge-forensics.test.ts",
+    "create-job": "node create-job.js",
     "db:push": "npx prisma db push",
     "db:generate": "npx prisma generate",
     "db:studio": "npx prisma studio"
@@ -30,7 +35,6 @@
     "pino": "^9.4.0",
     "pino-pretty": "^11.2.2",
     "playwright": "^1.48.0",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "zod": "^3.23.8",
     "zod-to-json-schema": "^3.25.2"
   },

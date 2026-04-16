@@ -1,26 +1,7 @@
-/**
- * CAPTCHA Solver — 2captcha-ts wrapper for reCAPTCHA solving
- *
- * Phase 7.4: Takes a sitekey + page URL, submits to 2captcha,
- * polls until token is ready, returns the token string.
- *
- * Retry: 2captcha returns ERROR_CODES on submit/pool that are retryable.
- * We wrap the raw solver with a retry loop (up to 3 attempts per solve).
- *
- * Non-retryable failures (invalid sitekey, domain mismatch, out of credits)
- * are thrown as regular errors — the worker retry loop (Phase 7.5/7.6)
- * will catch and rotate proxy.
- *
- * Usage:
- *   const token = await solveRecaptcha(sitekey, pageUrl);
- *   // inject token via page.evaluate(() => callback(token));
- */
-
+import { URLSearchParams } from 'node:url';
 import { getEnv } from './env/schema';
 import { logger } from './logger';
-import { Solver } from '2captcha-ts';
-
-// ── 2captcha retryable error codes ───────────────────────────────────────────
+import { createProxyAgents, getMaskedProxyUrl } from './proxy';
 
 const RETRYABLE_CODES = new Set([
   'ERROR_KEY_DOES_NOT_EXIST',
@@ -39,93 +20,234 @@ const RETRYABLE_CODES = new Set([
   'ERROR_TOO_MUCH_REQUESTS',
 ]);
 
+const MAX_ATTEMPTS = 3;
+const SUBMIT_DELAY_MS = 5_000;
+const POLL_DELAY_MS = 5_000;
+
+interface TwoCaptchaSuccess {
+  status: 1;
+  request: string;
+}
+
+interface TwoCaptchaFailure {
+  status: 0;
+  request: string;
+}
+
+type TwoCaptchaResponse = TwoCaptchaSuccess | TwoCaptchaFailure;
+
+export interface SolveRecaptchaOptions {
+  extraOptions?: Record<string, string | number | boolean | undefined>;
+  userAgent?: string;
+}
+
+export interface SolveTurnstileOptions {
+  extraOptions?: Record<string, string | number | boolean | undefined>;
+}
+
 function isRetryable(code: string): boolean {
   return RETRYABLE_CODES.has(code);
 }
 
-// ── Solver instance (lazy singleton) ─────────────────────────────────────────
+function buildProxyPayload(): Record<string, string> {
+  const { PROXY_HOST, PROXY_PASSWORD, PROXY_PORT, PROXY_USERNAME } = getEnv();
 
-let solverInstance: Solver | null = null;
+  return {
+    proxy: `${PROXY_USERNAME}:${PROXY_PASSWORD}@${PROXY_HOST}:${PROXY_PORT}`,
+    proxytype: 'http',
+  };
+}
 
-function getSolver(): Solver {
-  if (solverInstance) return solverInstance;
+async function getTwoCaptchaClient() {
+  const { got } = await import('got');
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (got as any).extend({
+    prefixUrl: 'https://2captcha.com',
+    agent: createProxyAgents(),
+    timeout: {
+      request: 30_000,
+    },
+    responseType: 'json',
+    retry: {
+      limit: 1,
+    },
+  });
+}
+
+function buildSubmitPayload(
+  method: 'userrecaptcha' | 'turnstile',
+  params: Record<string, string | number | boolean | undefined>,
+): URLSearchParams {
+  const { TWO_CAPTCHA_API_KEY } = getEnv();
+  const payload = new URLSearchParams();
+
+  payload.set('key', TWO_CAPTCHA_API_KEY);
+  payload.set('json', '1');
+  payload.set('header_acao', '1');
+  payload.set('soft_id', '3898');
+  payload.set('method', method);
+
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined) {
+      continue;
+    }
+
+    payload.set(key, String(value));
+  }
+
+  return payload;
+}
+
+function unwrapTwoCaptchaResponse(response: TwoCaptchaResponse): string {
+  if (response.status === 1) {
+    return response.request;
+  }
+
+  throw new Error(response.request);
+}
+
+async function submitAndPoll(
+  method: 'userrecaptcha' | 'turnstile',
+  payload: URLSearchParams,
+  logLabel: string,
+): Promise<string> {
+  const client = await getTwoCaptchaClient();
   const { TWO_CAPTCHA_API_KEY } = getEnv();
 
-  solverInstance = new Solver(TWO_CAPTCHA_API_KEY);
-  logger.debug('2captcha-ts Solver initialized');
+  logger.info(
+    {
+      method,
+      proxy: getMaskedProxyUrl(),
+    },
+    `Submitting ${logLabel} to 2captcha`,
+  );
 
-  return solverInstance;
+  const submitResponse = await client.post('in.php', {
+    body: payload.toString(),
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+    },
+  });
+
+  const submitId = unwrapTwoCaptchaResponse(submitResponse.body as TwoCaptchaResponse);
+
+  while (true) {
+    await new Promise(resolve => setTimeout(resolve, POLL_DELAY_MS));
+
+    const pollResponse = await client.get('res.php', {
+      searchParams: {
+        key: TWO_CAPTCHA_API_KEY,
+        action: 'get',
+        id: submitId,
+        json: '1',
+      },
+    });
+
+    const body = pollResponse.body as TwoCaptchaResponse;
+    if (body.status === 1) {
+      return body.request;
+    }
+
+    if (body.request === 'CAPCHA_NOT_READY') {
+      continue;
+    }
+
+    throw new Error(body.request);
+  }
 }
 
-// ── reCAPTCHA solve function ───────────────────────────────────────────────────
-
-const MAX_ATTEMPTS = 3;
-const SUBMIT_DELAY_MS = 5_000; // wait between retry attempts
-
-export interface SolveRecaptchaOptions {
-  /** Extra 2captcha options (e.g. { proxy: { type: 'http', uri: '...' } }) */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extraOptions?: Record<string, any>;
-}
-
-/**
- * Solve a Google reCAPTCHA given its sitekey and the page URL it appears on.
- *
- * @param sitekey   - The data-sitekey value from the reCAPTCHA element
- * @param pageUrl   - The full URL of the page containing the challenge
- * @param opts      - Optional extra 2captcha parameters (proxy, invisible, etc.)
- * @returns         - The solved CAPTCHA token string
- * @throws          - Error on non-retryable failure or after MAX_ATTEMPTS
- */
 export async function solveRecaptcha(
   sitekey: string,
   pageUrl: string,
   opts: SolveRecaptchaOptions = {},
 ): Promise<string> {
-  const solver = getSolver();
-
-  logger.info({ sitekey: sitekey.slice(0, 10) + '…', pageUrl }, 'Submitting reCAPTCHA to 2captcha');
-
   let lastError: Error | null = null;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = await solver.recaptcha({
+      const payload = buildSubmitPayload('userrecaptcha', {
         googlekey: sitekey,
         pageurl: pageUrl,
+        userAgent: opts.userAgent,
+        ...buildProxyPayload(),
         ...opts.extraOptions,
       });
 
+      const token = await submitAndPoll('userrecaptcha', payload, 'reCAPTCHA');
+
       logger.info(
-        { tokenPreview: result.data.slice(0, 20) + '…', provider: '2captcha' },
+        { tokenPreview: token.slice(0, 20) + '...', provider: '2captcha' },
         'reCAPTCHA solved successfully',
       );
 
-      return result.data;
+      return token;
     } catch (err) {
       const code = err instanceof Error ? err.message : String(err);
       lastError = err instanceof Error ? err : new Error(code);
-
       const retryable = isRetryable(code);
+
       logger.warn(
         { attempt, maxAttempts: MAX_ATTEMPTS, code, retryable },
         `2captcha solve attempt ${attempt} failed`,
       );
 
       if (!retryable) {
-        // Non-retryable: bubble up immediately
         throw lastError;
       }
 
       if (attempt < MAX_ATTEMPTS) {
-        // Wait before retrying
         await new Promise(resolve => setTimeout(resolve, SUBMIT_DELAY_MS));
       }
     }
   }
 
-  // All attempts exhausted
   throw lastError ?? new Error('reCAPTCHA solve failed after max attempts');
+}
+
+export async function solveCloudflareTurnstile(
+  sitekey: string,
+  pageUrl: string,
+  opts: SolveTurnstileOptions = {},
+): Promise<string> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const payload = buildSubmitPayload('turnstile', {
+        sitekey,
+        pageurl: pageUrl,
+        ...buildProxyPayload(),
+        ...opts.extraOptions,
+      });
+
+      const token = await submitAndPoll('turnstile', payload, 'Cloudflare Turnstile');
+
+      logger.info(
+        { tokenPreview: token.slice(0, 20) + '...', provider: '2captcha' },
+        'Cloudflare Turnstile solved successfully',
+      );
+
+      return token;
+    } catch (err) {
+      const code = err instanceof Error ? err.message : String(err);
+      lastError = err instanceof Error ? err : new Error(code);
+      const retryable = isRetryable(code);
+
+      logger.warn(
+        { attempt, maxAttempts: MAX_ATTEMPTS, code, retryable },
+        `2captcha turnstile solve attempt ${attempt} failed`,
+      );
+
+      if (!retryable) {
+        throw lastError;
+      }
+
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise(resolve => setTimeout(resolve, SUBMIT_DELAY_MS));
+      }
+    }
+  }
+
+  throw lastError ?? new Error('Cloudflare Turnstile solve failed after max attempts');
 }

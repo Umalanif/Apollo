@@ -1,53 +1,140 @@
-import { ProxyConfiguration } from '@crawlee/core';
-import { PlaywrightCrawler } from 'crawlee';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import type { Page } from 'playwright';
-import { APOLLO_PROXY_BYPASS_LIST, configureApolloPage } from './apollo-browser';
+import type { BrowserContext, Page, Request } from 'playwright';
+import { configureApolloPage } from './apollo-browser';
+import { launchApolloContext } from './browser-launch';
+import { attachPageDiagnostics } from './browser-diagnostics';
+import { mutateHashScript } from './browser-context';
 import { detectChallenge, type ChallengeDetection } from './challenge-detector';
-import { ChallengeBypassSignal } from './errors';
-import { getEnv } from './env/schema';
+import { ApolloResponseError, type ApolloResponseMeta, SessionTrustError } from './errors';
+import { createApolloClient, extractSessionAuth, postApolloJson } from './extractor';
+import { parseApolloMetadataResponse } from './leads-scraper';
 import { logger } from './logger';
+import { runApolloSessionPreflight, warmupApolloSession } from './session-preflight';
 import { AuthManager } from './services/auth.service';
-
-function sanitizeSessionKey(sessionKey: string): string {
-  return sessionKey.replace(/[^a-zA-Z0-9_-]/g, '-');
-}
-
-function buildProxyUsername(sessionKey?: string): string {
-  const { PROXY_USERNAME, PROXY_SESSION_KEY, PROXY_SESSION_TTL_MINUTES } = getEnv();
-  sanitizeSessionKey(sessionKey ?? PROXY_SESSION_KEY);
-  return `${PROXY_USERNAME}__sessttl.${PROXY_SESSION_TTL_MINUTES}`;
-  // If DataImpulse support is later confirmed for combined sticky+session identifiers
-  // on this port, append `;sessid.${stickySessionKey}` here.
-}
-
-export function buildProxyUrl(port?: number, sessionKey?: string): string {
-  const { PROXY_HOST, PROXY_PASSWORD, PROXY_STICKY_PORT } = getEnv();
-  const effectivePort = port ?? PROXY_STICKY_PORT;
-  return `http://${buildProxyUsername(sessionKey)}:${PROXY_PASSWORD}@${PROXY_HOST}:${effectivePort}`;
-}
-
-export function getProxyComponents(port?: number, sessionKey?: string) {
-  const { PROXY_HOST, PROXY_PASSWORD, PROXY_STICKY_PORT } = getEnv();
-  const effectivePort = port ?? PROXY_STICKY_PORT;
-  return {
-    server: `http://${PROXY_HOST}:${effectivePort}`,
-    username: buildProxyUsername(sessionKey),
-    password: PROXY_PASSWORD,
-  };
-}
 
 export interface CrawlerDeps {
   jobId: string;
-  proxyPort?: number;
-  proxySessionKey?: string;
   onChallengeDetected?: (detection: ChallengeDetection, url: string, page: Page) => void | Promise<void>;
-  onPeopleResponse?: (payload: unknown, page: Page, url: string) => void | Promise<void>;
+  onPeopleResponse?: (payload: unknown, responseMeta: ApolloResponseMeta, page: Page, url: string) => void | Promise<void>;
 }
+
+export interface ManagedCrawler {
+  run: (requests: Array<{ url: string; uniqueKey?: string; userData?: { targetUrl?: string } }>) => Promise<{ requestsFinished: number; requestsFailed: number }>;
+  teardown: () => Promise<void>;
+  consumeTerminalError: () => Error | null;
+}
+
+interface ApolloRequestCapture {
+  headers: Record<string, string>;
+  method: string;
+  postDataJson: unknown;
+  requestUrl: string;
+  responsePath: string;
+}
+
+interface ApolloPeopleApiResponse {
+  payload: unknown;
+  responseMeta: ApolloResponseMeta;
+}
+
+type ApolloPeopleApiResult =
+  | { ok: true; value: ApolloPeopleApiResponse }
+  | { ok: false; error: unknown };
 
 const PEOPLE_RESPONSE_TIMEOUT_MS = 180_000;
 const APOLLO_SETTLE_TIMEOUT_MS = 10_000;
+const INLINE_CHALLENGE_ATTEMPTS = 2;
+
+function extractChallengeSitekey(text: string): string | null {
+  const match = text.match(/data-sitekey=["']([^"']+)["']/i);
+  return match?.[1] ?? null;
+}
+
+function detectChallengeTypeFromText(text: string): { challengeType: string | null; challengeSitekey: string | null } {
+  const normalized = text.toLowerCase();
+  const challengeSitekey = extractChallengeSitekey(text);
+
+  if (normalized.includes('cf-turnstile') || normalized.includes('turnstile')) {
+    return { challengeType: 'turnstile', challengeSitekey };
+  }
+
+  if (
+    normalized.includes('challenges.cloudflare.com')
+    || normalized.includes('cf-chl')
+    || normalized.includes('cloudflare')
+    || normalized.includes('verify you are a human')
+    || normalized.includes('checking your browser')
+  ) {
+    return { challengeType: 'cloudflare', challengeSitekey };
+  }
+
+  if (
+    normalized.includes('datadome')
+    || normalized.includes('captcha-delivery.com')
+  ) {
+    return { challengeType: 'datadome', challengeSitekey };
+  }
+
+  if (
+    normalized.includes('recaptcha')
+    || normalized.includes('g-recaptcha')
+  ) {
+    return { challengeType: 'recaptcha', challengeSitekey };
+  }
+
+  if (
+    normalized.includes('access denied')
+    || normalized.includes('forbidden')
+    || normalized.includes('too many requests')
+    || normalized.includes('rate limit')
+    || normalized.includes('unusual traffic')
+    || normalized.includes('blocked')
+  ) {
+    return { challengeType: 'generic_block', challengeSitekey };
+  }
+
+  return { challengeType: null, challengeSitekey };
+}
+
+function buildResponseMeta(responseUrl: string, status: number, contentType: string, bodyText: string, challengeSitekey?: string | null): ApolloResponseMeta {
+  return {
+    responseUrl,
+    status,
+    contentType,
+    bodyPreview: bodyText.slice(0, 500),
+    challengeSitekey,
+  };
+}
+
+function extractResponsePath(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
+}
+
+async function readRequestHeaders(request: Request): Promise<Record<string, string>> {
+  try {
+    return await request.allHeaders();
+  } catch {
+    return request.headers();
+  }
+}
+
+function parseRequestJson(request: Request): unknown {
+  const postData = request.postData();
+  if (!postData) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(postData) as unknown;
+  } catch {
+    return {};
+  }
+}
 
 async function captureDebugScreenshot(page: Page, jobId: string, suffix: string): Promise<string | null> {
   try {
@@ -88,17 +175,11 @@ async function navigateToTarget(page: Page, jobId: string, targetUrl: string): P
       'Direct Apollo route navigation failed, falling back to hash mutation',
     );
 
-    await page.evaluate((hash: string) => {
-      history.replaceState(null, '', hash);
-      window.dispatchEvent(new HashChangeEvent('hashchange', {
-        oldURL: window.location.href,
-        newURL: window.location.origin + '/' + hash,
-      }));
-    }, targetHash);
+    await page.evaluate(mutateHashScript, targetHash);
   }
 
   await page.waitForFunction(
-    () => window.location.hash.startsWith('#/people') || window.location.pathname === '/people',
+    "window.location.hash.startsWith('#/people') || window.location.pathname === '/people'",
     undefined,
     { timeout: 60_000 },
   );
@@ -108,114 +189,269 @@ async function navigateToTarget(page: Page, jobId: string, targetUrl: string): P
   logger.info({ jobId, currentUrl: page.url(), targetHash, targetHref }, 'Apollo people route requested');
 }
 
-export async function createCrawler(deps: CrawlerDeps): Promise<PlaywrightCrawler> {
-  const { jobId, proxySessionKey, onChallengeDetected, onPeopleResponse } = deps;
-  const { PROXY_HOST, PROXY_STICKY_PORT, PROXY_SESSION_TTL_MINUTES } = getEnv();
-  const proxyPort = deps.proxyPort ?? PROXY_STICKY_PORT;
-  const proxyComponents = getProxyComponents(proxyPort, proxySessionKey);
+async function replayPeopleSearch(jobId: string, page: Page, requestCapture: ApolloRequestCapture): Promise<ApolloPeopleApiResponse> {
+  const auth = await extractSessionAuth(page);
+  const userAgent = await page.evaluate(() => navigator.userAgent);
+  const client = await createApolloClient({
+    jobId,
+    auth,
+    requestHeaders: requestCapture.headers,
+    refererUrl: page.url(),
+    userAgent,
+  });
 
   logger.info(
     {
       jobId,
-      proxyPort,
-      proxyHost: `http://${PROXY_HOST}:${proxyPort}`,
-      proxySessionKey,
-      proxySessionTtlMinutes: PROXY_SESSION_TTL_MINUTES,
+      requestUrl: requestCapture.requestUrl,
+      responsePath: requestCapture.responsePath,
     },
-    'Creating PlaywrightCrawler',
+    'Replaying canonical Apollo people search request',
   );
 
-  return new PlaywrightCrawler({
-    maxConcurrency: 1,
-    maxRequestRetries: 2,
-    requestHandlerTimeoutSecs: 480,
-    proxyConfiguration: new ProxyConfiguration({ proxyUrls: [buildProxyUrl(proxyPort, proxySessionKey)] }),
-    launchContext: {
-      launchOptions: {
-        headless: false,
-        slowMo: 250,
-        proxy: {
-          server: `http://${proxyComponents.server.replace('http://', '')}`,
-          username: proxyComponents.username,
-          password: proxyComponents.password,
+  const replay = await postApolloJson(client, 'api/v1/mixed_people/search', requestCapture.postDataJson);
+  const responseMeta = buildResponseMeta(
+    replay.responseUrl,
+    replay.status,
+    replay.contentType,
+    replay.rawBody,
+    null,
+  );
+
+  return {
+    payload: replay.payload,
+    responseMeta,
+  };
+}
+
+async function waitForApolloPeoplePayload(page: Page, jobId: string): Promise<ApolloPeopleApiResponse> {
+  const deadline = Date.now() + PEOPLE_RESPONSE_TIMEOUT_MS;
+  let replayAttempted = false;
+
+  while (Date.now() < deadline) {
+    const remainingMs = deadline - Date.now();
+    const response = await page.waitForResponse(
+      candidate => (
+        candidate.request().method() === 'POST'
+        && candidate.url().includes('/api/v1/mixed_people/search')
+      ),
+      { timeout: remainingMs },
+    );
+
+    const request = response.request();
+    const responsePath = extractResponsePath(response.url());
+    const requestCapture: ApolloRequestCapture = {
+      headers: await readRequestHeaders(request),
+      method: request.method(),
+      postDataJson: parseRequestJson(request),
+      requestUrl: request.url(),
+      responsePath,
+    };
+
+    const contentType = response.headers()['content-type'] ?? '';
+    const bodyText = await response.text().catch(() => '');
+    const { challengeType, challengeSitekey } = detectChallengeTypeFromText(`${contentType}\n${bodyText}`);
+    const responseMeta = buildResponseMeta(response.url(), response.status(), contentType, bodyText, challengeSitekey);
+
+    if (!contentType.includes('application/json')) {
+      logger.warn(
+        {
+          jobId,
+          ...responseMeta,
+          challengeType,
         },
-        args: [
-          '--disable-blink-features=AutomationControlled',
-          `--proxy-bypass-list=${APOLLO_PROXY_BYPASS_LIST}`,
-        ],
-      },
-    },
-    requestHandler: async ({ page, request }) => {
-      const targetUrl = typeof request.userData?.targetUrl === 'string'
-        ? request.userData.targetUrl
-        : String(request.url);
-
-      page.setDefaultNavigationTimeout(120_000);
-      page.setDefaultTimeout(120_000);
-      await configureApolloPage(page);
-
-      page.on('requestfailed', req => {
-        logger.warn(
-          { jobId, url: req.url(), failure: req.failure()?.errorText ?? 'unknown' },
-          'Request failed',
-        );
-      });
-
-      await AuthManager.ensureAuthenticated(page, jobId);
-      const peopleResponsePromise = page.waitForResponse(
-        response => (
-          response.request().method() === 'POST'
-          && response.url().includes('/api/v1/mixed_people/search')
-        ),
-        { timeout: PEOPLE_RESPONSE_TIMEOUT_MS },
+        'Apollo people response is non-JSON',
       );
-      await navigateToTarget(page, jobId, targetUrl);
 
-      let challengeSignal: Error | null = null;
+      if (challengeType) {
+        throw new ApolloResponseError(
+          `Apollo people response looks like ${challengeType} challenge`,
+          responseMeta,
+          ['Non-JSON response returned for /api/v1/mixed_people/search'],
+          challengeType,
+        );
+      }
 
+      throw new ApolloResponseError(
+        'Apollo people response is non-JSON',
+        responseMeta,
+        ['Non-JSON response returned for /api/v1/mixed_people/search'],
+      );
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(bodyText) as unknown;
+    } catch (err) {
+      logger.warn(
+        {
+          jobId,
+          ...responseMeta,
+          challengeType,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'Apollo people response contains invalid JSON',
+      );
+
+      throw new ApolloResponseError(
+        challengeType
+          ? `Apollo people response contains invalid JSON and looks like ${challengeType} challenge`
+          : 'Apollo people response contains invalid JSON',
+        responseMeta,
+        ['Invalid JSON returned for /api/v1/mixed_people/search'],
+        challengeType,
+      );
+    }
+
+    if (responsePath.endsWith('/search_metadata_mode')) {
+      parseApolloMetadataResponse(jobId, payload, responseMeta);
+
+      if (!replayAttempted) {
+        replayAttempted = true;
+        return replayPeopleSearch(jobId, page, requestCapture);
+      }
+
+      continue;
+    }
+
+    return {
+      payload,
+      responseMeta,
+    };
+  }
+
+  throw new Error(`Apollo people search response not observed within ${PEOPLE_RESPONSE_TIMEOUT_MS}ms`);
+}
+
+export async function createCrawler(deps: CrawlerDeps): Promise<ManagedCrawler> {
+  const { jobId, onChallengeDetected, onPeopleResponse } = deps;
+  let browserContext: BrowserContext | null = null;
+  let terminalError: Error | null = null;
+  return {
+    run: async requests => {
       try {
-        const detection = await detectChallenge(page);
-        if (detection.type !== null) {
-          const result = onChallengeDetected?.(detection, targetUrl, page);
-          if (result instanceof Promise) {
-            await result;
+        const firstRequest = requests[0];
+        if (!firstRequest) {
+          throw new Error('Crawler run() requires at least one request');
+        }
+
+        const targetUrl = typeof firstRequest.userData?.targetUrl === 'string'
+          ? firstRequest.userData.targetUrl
+          : String(firstRequest.url);
+
+        browserContext = await launchApolloContext(jobId);
+        const page = browserContext.pages()[0] ?? await browserContext.newPage();
+
+        attachPageDiagnostics(page, jobId);
+        page.setDefaultNavigationTimeout(120_000);
+        page.setDefaultTimeout(120_000);
+        await configureApolloPage(page);
+        await AuthManager.ensureAuthenticated(page, jobId);
+        await warmupApolloSession(page, jobId);
+        const sessionPreflight = await runApolloSessionPreflight(page);
+        logger.info({ jobId, sessionPreflight }, 'Apollo session preflight completed');
+        if (sessionPreflight.blockers.length > 0) {
+          throw new SessionTrustError(
+            `Apollo session is not stable enough for people search: ${sessionPreflight.blockers.join('; ')}`,
+            sessionPreflight.blockers,
+          );
+        }
+
+        let inlineChallengeAttempts = 0;
+
+        while (true) {
+          const peopleResponsePromise: Promise<ApolloPeopleApiResult> = waitForApolloPeoplePayload(page, jobId)
+            .then<ApolloPeopleApiResult>(value => ({ ok: true, value }))
+            .catch<ApolloPeopleApiResult>(error => ({ ok: false, error }));
+          await navigateToTarget(page, jobId, targetUrl);
+
+          const domDetection = await detectChallenge(page);
+          if (domDetection.type !== null) {
+            const result = onChallengeDetected?.(domDetection, targetUrl, page);
+            if (result instanceof Promise) {
+              await result;
+            }
+
+            if (
+              (domDetection.type === 'recaptcha' || domDetection.type === 'turnstile')
+              && inlineChallengeAttempts < INLINE_CHALLENGE_ATTEMPTS
+            ) {
+              inlineChallengeAttempts += 1;
+              await page.waitForTimeout(3_000);
+              continue;
+            }
+          }
+
+          if (!onPeopleResponse) {
+            return { requestsFinished: 1, requestsFailed: 0 };
+          }
+
+          try {
+            const peopleResponseResult = await peopleResponsePromise;
+            if (!peopleResponseResult.ok) {
+              throw peopleResponseResult.error;
+            }
+
+            await onPeopleResponse(
+              peopleResponseResult.value.payload,
+              peopleResponseResult.value.responseMeta,
+              page,
+              targetUrl,
+            );
+
+            return { requestsFinished: 1, requestsFailed: 0 };
+          } catch (err) {
+            if (
+              err instanceof ApolloResponseError
+              && (err.challengeType === 'turnstile' || err.challengeType === 'recaptcha')
+              && err.responseMeta.challengeSitekey
+              && inlineChallengeAttempts < INLINE_CHALLENGE_ATTEMPTS
+            ) {
+              inlineChallengeAttempts += 1;
+              const responseDetection: ChallengeDetection = {
+                type: err.challengeType,
+                sitekey: err.responseMeta.challengeSitekey,
+                message: `Challenge detected in Apollo API response: ${err.challengeType}`,
+              };
+              const result = onChallengeDetected?.(responseDetection, err.responseMeta.responseUrl, page);
+              if (result instanceof Promise) {
+                await result;
+              }
+              await page.waitForTimeout(3_000);
+              continue;
+            }
+
+            const screenshotPath = await captureDebugScreenshot(page, jobId, 'people-response-timeout');
+            logger.error(
+              {
+                jobId,
+                currentUrl: page.url(),
+                targetUrl,
+                screenshotPath,
+                err: err instanceof Error ? err.message : String(err),
+              },
+              'Failed while waiting for Apollo people search response',
+            );
+            throw err;
           }
         }
       } catch (err) {
-        if (err instanceof ChallengeBypassSignal) {
-          challengeSignal = err;
-        } else {
-          logger.debug({ jobId, err: String(err) }, 'Challenge detection error');
-        }
-      }
-
-      if (challengeSignal) {
-        throw challengeSignal;
-      }
-
-      if (onPeopleResponse) {
-        let response;
-        try {
-          response = await peopleResponsePromise;
-        } catch (err) {
-          const screenshotPath = await captureDebugScreenshot(page, jobId, 'people-response-timeout');
-          logger.error(
-            {
-              jobId,
-              currentUrl: page.url(),
-              targetUrl,
-              screenshotPath,
-              err: err instanceof Error ? err.message : String(err),
-            },
-            'Timed out waiting for Apollo people search response',
-          );
-          throw new Error(`Apollo people search response not observed within ${PEOPLE_RESPONSE_TIMEOUT_MS}ms`);
-        }
-
-        const payload = await response.json();
-        await onPeopleResponse(payload, page, targetUrl);
+        terminalError = err instanceof Error ? err : new Error(String(err));
+        return { requestsFinished: 0, requestsFailed: 1 };
       }
     },
-    useSessionPool: false,
-  });
+    teardown: async () => {
+      if (!browserContext) {
+        return;
+      }
+
+      await browserContext.close();
+      browserContext = null;
+    },
+    consumeTerminalError: () => {
+      const currentError = terminalError;
+      terminalError = null;
+      return currentError;
+    },
+  };
 }

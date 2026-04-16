@@ -59,6 +59,8 @@ config.local.*
 *.accdb
 
 # Parsing results (generated data, not part of source)
+exports/
+storage/
 data/
 results/
 output/
