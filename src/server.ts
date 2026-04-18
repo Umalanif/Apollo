@@ -6,13 +6,7 @@ import Bree from 'bree';
 import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 import { logger } from './logger';
-
-const TargetingSchema = z.object({
-  keywords: z.array(z.string()).optional(),
-  titles: z.array(z.string()).optional(),
-  locations: z.array(z.string()).optional(),
-  companies: z.array(z.string()).optional(),
-});
+import { TargetingSchema } from './targeting';
 
 const CreateJobBodySchema = z.object({
   targeting: TargetingSchema,

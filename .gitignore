@@ -37,9 +37,7 @@ pids/
 .DS_Store
 
 # Generated/api response files (may contain sensitive data)
-fetch.json
-response.json
-responseheaders.json
+
 
 # Cache and temporary files
 .cache/

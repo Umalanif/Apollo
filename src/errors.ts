@@ -8,6 +8,7 @@ export interface ApolloResponseMeta {
   contentType: string;
   bodyPreview: string;
   challengeSitekey?: string | null;
+  challengeSource?: 'page_dom' | 'api_response' | null;
 }
 
 /**
@@ -69,20 +70,46 @@ export class ManualAuthenticationRequiredError extends Error {
 }
 
 export class ApolloResponseError extends Error {
+  readonly code: string;
   readonly responseMeta: ApolloResponseMeta;
   readonly validationErrors: string[];
   readonly challengeType: string | null;
+  readonly challengeSource: ApolloResponseMeta['challengeSource'];
 
   constructor(
     message: string,
     responseMeta: ApolloResponseMeta,
     validationErrors: string[] = [],
     challengeType: string | null = null,
+    code = 'APOLLO_RESPONSE_ERROR',
   ) {
     super(message);
     this.name = 'ApolloResponseError';
+    this.code = code;
     this.responseMeta = responseMeta;
     this.validationErrors = validationErrors;
     this.challengeType = challengeType;
+    this.challengeSource = responseMeta.challengeSource ?? null;
+  }
+}
+
+export class QueryTooBroadError extends ApolloResponseError {
+  readonly threshold: number;
+  readonly totalEntries: number | null;
+  readonly pipelineTotal: number | null;
+
+  constructor(
+    message: string,
+    responseMeta: ApolloResponseMeta,
+    threshold: number,
+    totalEntries: number | null,
+    pipelineTotal: number | null,
+    validationErrors: string[] = [],
+  ) {
+    super(message, responseMeta, validationErrors, null, 'QUERY_TOO_BROAD');
+    this.name = 'QueryTooBroadError';
+    this.threshold = threshold;
+    this.totalEntries = totalEntries;
+    this.pipelineTotal = pipelineTotal;
   }
 }

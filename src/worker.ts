@@ -19,22 +19,20 @@ import {
   AuthenticationError,
   ChallengeBypassSignal,
   EnvironmentTrustError,
+  QueryTooBroadError,
   SessionTrustError,
 } from './errors';
 import { exportLeads } from './export';
 import { parseApolloPeopleResponse } from './leads-scraper';
 import { logger } from './logger';
 import { APOLLO_LOGIN_URL } from './apollo-browser';
+import { isTargetClosedError, safePageEvaluate, safePageUrl, safePageWaitForTimeout } from './playwright-helpers';
 import { getProxyConfig } from './proxy';
+import type { Targeting } from './targeting';
 
 export interface WorkerData {
   jobId: string;
-  targeting: {
-    keywords?: string[];
-    titles?: string[];
-    locations?: string[];
-    companies?: string[];
-  };
+  targeting: Targeting;
 }
 
 interface ProgressMessage {
@@ -82,7 +80,14 @@ async function waitForManualChallengeResolution(
       throw new Error('Browser page was closed while waiting for manual CAPTCHA resolution');
     }
 
-    const detection = await page.evaluate(readManualChallengeStateScript);
+    const detection = await safePageEvaluate<{
+      hasTurnstile: boolean;
+      hasCloudflare: boolean;
+      currentUrl: string;
+    }>(page, readManualChallengeStateScript);
+    if (!detection) {
+      throw new Error('Browser page was closed while waiting for manual CAPTCHA resolution');
+    }
 
     if (!detection.hasTurnstile && !detection.hasCloudflare) {
       logger.info(
@@ -99,10 +104,13 @@ async function waitForManualChallengeResolution(
 }
 
 async function injectChallengeToken(page: Page, token: string): Promise<void> {
-  await page.evaluate(injectChallengeTokenScript, token);
+  const result = await safePageEvaluate(page, injectChallengeTokenScript, token);
+  if (result === null && page.isClosed()) {
+    throw new Error('Browser page closed before challenge token injection could complete');
+  }
 }
 
-function buildPeopleSearchUrl(targeting: WorkerData['targeting']): string {
+export function buildPeopleSearchUrl(targeting: WorkerData['targeting']): string {
   const params = new URLSearchParams();
 
   for (const keyword of targeting.keywords ?? []) {
@@ -119,6 +127,22 @@ function buildPeopleSearchUrl(targeting: WorkerData['targeting']): string {
 
   for (const company of targeting.companies ?? []) {
     params.append('search[organization_names][]', company);
+  }
+
+  for (const seniority of targeting.seniorities ?? []) {
+    params.append('search[person_seniorities][]', seniority);
+  }
+
+  for (const employeeRange of targeting.organizationNumEmployeesRanges ?? []) {
+    params.append('search[organization_num_employees_ranges][]', employeeRange);
+  }
+
+  for (const industryTagId of targeting.organizationIndustryTagIds ?? []) {
+    params.append('search[organization_industry_tag_ids][]', industryTagId);
+  }
+
+  for (const industryKeyword of targeting.organizationIndustryKeywords ?? []) {
+    params.append('search[q_organization_industry_keywords][]', industryKeyword);
   }
 
   const query = params.toString();
@@ -175,9 +199,11 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
     const MAX_RETRIES = 3;
     const MAX_CHALLENGE_RETRIES = 3;
     const CHALLENGE_RETRY_DELAY_MS = 5_000;
+    const TRUST_COOLDOWN_MS = Number(process.env.APOLLO_TRUST_COOLDOWN_MS ?? 15_000);
     const { host: proxyHost, port: proxyPort } = getProxyConfig();
     let failCount = 0;
     let challengeRetryCount = 0;
+    let launchAttempt = 0;
     let saved = 0;
 
     logger.info(
@@ -192,6 +218,7 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
 
     while (true) {
       try {
+        launchAttempt += 1;
         const onChallengeDetected = async (
           detection: ChallengeDetection,
           url: string,
@@ -212,8 +239,13 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
               browserConfig,
               fallbackUrl: url,
             });
-            const turnstileState = await page.evaluate(readTurnstileWidgetStateScript);
-            const sitekey = detection.sitekey ?? turnstileState.sitekey;
+            const turnstileState = await safePageEvaluate<{
+              sitekey: string | null;
+              action: string | null;
+              cData: string | null;
+              chlPageData: string | null;
+            }>(page, readTurnstileWidgetStateScript);
+            const sitekey = detection.sitekey ?? turnstileState?.sitekey ?? null;
 
             if (!sitekey) {
               await waitForManualChallengeResolution(page, data.jobId, 'turnstile');
@@ -225,6 +257,7 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
                 phase: 'after-solve',
                 browserConfig,
                 fallbackUrl: url,
+                baselineRecord: preSolveRecord,
               });
               if (afterRecord.outcome !== 'challenge_cleared') {
                 throw new EnvironmentTrustError(
@@ -236,7 +269,7 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
               return;
             }
 
-            const userAgent = await page.evaluate(() => navigator.userAgent);
+            const userAgent = await safePageEvaluate<string>(page, () => navigator.userAgent);
             const resolvedPageUrl = resolveTurnstilePageUrl({
               fallbackUrl: url,
               topLevelPageUrl: preSolveRecord.topLevelPageUrl,
@@ -245,14 +278,14 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
             });
             const token = await solveCloudflareTurnstile(sitekey, resolvedPageUrl.pageUrl, {
               extraOptions: {
-                action: turnstileState.action ?? undefined,
-                data: turnstileState.cData ?? undefined,
-                pagedata: turnstileState.chlPageData ?? undefined,
-                useragent: userAgent,
+                action: turnstileState?.action ?? undefined,
+                data: turnstileState?.cData ?? undefined,
+                pagedata: turnstileState?.chlPageData ?? undefined,
+                useragent: userAgent ?? undefined,
               },
             });
             await injectChallengeToken(page, token);
-            await page.waitForTimeout(3_000);
+            await safePageWaitForTimeout(page, 3_000);
             const afterRecord = await recordChallengeForensics({
               page,
               jobId: data.jobId,
@@ -261,6 +294,7 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
               phase: 'after-solve',
               browserConfig,
               fallbackUrl: resolvedPageUrl.pageUrl,
+              baselineRecord: preSolveRecord,
             });
             if (afterRecord.outcome === 'verification_failed' || afterRecord.outcome === 'challenge_still_present') {
               throw new EnvironmentTrustError(
@@ -301,10 +335,10 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
             throw new ChallengeBypassSignal('recaptcha', url);
           }
 
-          const userAgent = await page.evaluate(() => navigator.userAgent);
-          const token = await solveRecaptcha(detection.sitekey, url, { userAgent });
+          const userAgent = await safePageEvaluate<string>(page, () => navigator.userAgent);
+          const token = await solveRecaptcha(detection.sitekey, url, { userAgent: userAgent ?? undefined });
           await injectChallengeToken(page, token);
-          await page.waitForTimeout(3_000);
+          await safePageWaitForTimeout(page, 3_000);
 
           failCount = 0;
         };
@@ -316,7 +350,7 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
           url: string,
         ): Promise<void> => {
           logger.debug(
-            { jobId: data.jobId, url, currentUrl: page.url(), responseMeta },
+            { jobId: data.jobId, url, currentUrl: safePageUrl(page), responseMeta },
             'Processing intercepted Apollo response',
           );
 
@@ -340,6 +374,7 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
 
         activeCrawler = await createCrawler({
           jobId: data.jobId,
+          launchAttempt,
           onChallengeDetected,
           onPeopleResponse,
         });
@@ -396,7 +431,7 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
           }
 
           failCount = 0;
-          await sleep(CHALLENGE_RETRY_DELAY_MS * challengeRetryCount);
+          await sleep(TRUST_COOLDOWN_MS * challengeRetryCount);
           continue;
         }
 
@@ -426,10 +461,28 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
         }
 
         if (err instanceof ApolloResponseError) {
+          if (err instanceof QueryTooBroadError) {
+            logger.error(
+              {
+                jobId: data.jobId,
+                code: err.code,
+                threshold: err.threshold,
+                totalEntries: err.totalEntries,
+                pipelineTotal: err.pipelineTotal,
+                responseMeta: err.responseMeta,
+                validationErrors: err.validationErrors,
+              },
+              'FATAL: APOLLO_QUERY_TOO_BROAD',
+            );
+            post({ type: 'error', payload: { message: err.message } });
+            return;
+          }
+
           logger.error(
             {
               jobId: data.jobId,
               challengeType: err.challengeType,
+              challengeSource: err.challengeSource,
               responseMeta: err.responseMeta,
               validationErrors: err.validationErrors,
               proxyPort,
@@ -465,6 +518,9 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
 
         challengeRetryCount = 0;
         const message = err instanceof Error ? err.message : String(err);
+        if (isTargetClosedError(err)) {
+          logger.warn({ jobId: data.jobId, launchAttempt, proxyPort }, 'Target closed during worker run; relaunching persistent profile');
+        }
         logger.error({ jobId: data.jobId, err: message, proxyPort }, 'Extraction error');
         failCount++;
         if (failCount >= MAX_RETRIES) {

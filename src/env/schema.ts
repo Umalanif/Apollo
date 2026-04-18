@@ -4,7 +4,7 @@ import { z } from 'zod';
 config();
 
 const EMOJI_REGEX = /\p{Emoji}/u;
-const URL_REGEX = /^https:\/\/www\.linkedin\.com\/in\/[\w-]+\/?$/;
+const URL_REGEX = /^https:\/\/linkedin\.com\/in\/[\w-]+\/?$/i;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function stripEmoji(str: string): string {
@@ -18,8 +18,17 @@ function toTitleCase(str: string): string {
     .join(' ');
 }
 
+export function normalizeLinkedInUrl(url: string): string {
+  return url.trim().replace(/^http:\/\//i, 'https://').replace(/^https:\/\/www\./i, 'https://');
+}
+
+const LinkedInUrlSchema = z.string()
+  .trim()
+  .transform(normalizeLinkedInUrl)
+  .pipe(z.string().regex(URL_REGEX, 'Invalid LinkedIn URL format'));
+
 export const LeadSchema = z.object({
-  linkedInUrl: z.string().trim().regex(URL_REGEX, 'Invalid LinkedIn URL format'),
+  linkedInUrl: LinkedInUrlSchema,
   firstName: z.string().min(1).transform(val => toTitleCase(stripEmoji(val.trim()))),
   lastName: z.string().min(1).transform(val => toTitleCase(stripEmoji(val.trim()))),
   title: z.string().optional().transform(val => val ? stripEmoji(val.trim()) : undefined),
@@ -43,6 +52,21 @@ const EnvSchema = z.object({
   BROWSER_LOCALE: z.string().min(2).optional(),
   BROWSER_TIMEZONE_ID: z.string().min(1).optional(),
   CLOUDFLARE_PROBE_URL: z.string().url().optional(),
+  APOLLO_PROFILE_KEY_MODE: z.enum(['account-proxy-browser']).optional(),
+  APOLLO_REUSE_PROFILE: z.preprocess(value => {
+    if (typeof value !== 'string') {
+      return value;
+    }
+    return value.trim().toLowerCase();
+  }, z.enum(['true', 'false']).transform(value => value === 'true')).optional(),
+  APOLLO_COOKIE_SEED_PATH: z.string().min(1).optional(),
+  APOLLO_COOKIE_SEED_INCLUDE_CF: z.preprocess(value => {
+    if (typeof value !== 'string') {
+      return value;
+    }
+    return value.trim().toLowerCase();
+  }, z.enum(['true', 'false']).transform(value => value === 'true')).optional(),
+  APOLLO_TRUST_COOLDOWN_MS: z.coerce.number().int().min(0).optional(),
   APOLLO_EMAIL: z.string().email('APOLLO_EMAIL must be a valid email').optional(),
   APOLLO_PASSWORD: z.string().min(1, 'APOLLO_PASSWORD is required').optional(),
   APOLLO_MS_EMAIL: z.string().email('APOLLO_MS_EMAIL must be a valid email').optional(),

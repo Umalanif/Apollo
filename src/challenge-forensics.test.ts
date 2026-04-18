@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { resolveTurnstilePageUrl } from './challenge-forensics';
+import { derivePostSolveOutcome, resolveTurnstilePageUrl } from './challenge-forensics';
 
 test('resolveTurnstilePageUrl prefers Cloudflare challenge frame URL', () => {
   const result = resolveTurnstilePageUrl({
@@ -36,4 +36,52 @@ test('resolveTurnstilePageUrl uses fallback when no better signal exists', () =>
 
   assert.equal(result.pageUrl, 'https://api.example/internal-trigger');
   assert.equal(result.source, 'fallback_url');
+});
+
+test('derivePostSolveOutcome prioritizes Turnstile render failure', () => {
+  const result = derivePostSolveOutcome({
+    hasVerificationFailedText: false,
+    hasTurnstile: true,
+    hasCloudflare: false,
+    currentPageUrl: 'https://app.apollo.io/#/people',
+    turnstileRenderErrorCode: '600010',
+    patChallengeFailed: false,
+    apolloCookieCount: 4,
+    cloudflareCookieNames: ['__cf_bm'],
+  }, 'after-solve');
+
+  assert.equal(result, 'turnstile_render_failed');
+});
+
+test('derivePostSolveOutcome classifies PAT 401 separately', () => {
+  const result = derivePostSolveOutcome({
+    hasVerificationFailedText: false,
+    hasTurnstile: true,
+    hasCloudflare: true,
+    currentPageUrl: 'https://app.apollo.io/#/people',
+    turnstileRenderErrorCode: null,
+    patChallengeFailed: true,
+    apolloCookieCount: 4,
+    cloudflareCookieNames: ['__cf_bm'],
+  }, 'after-solve');
+
+  assert.equal(result, 'pat_401');
+});
+
+test('derivePostSolveOutcome detects unchanged cookie state when challenge persists', () => {
+  const result = derivePostSolveOutcome({
+    hasVerificationFailedText: false,
+    hasTurnstile: true,
+    hasCloudflare: false,
+    currentPageUrl: 'https://app.apollo.io/#/people',
+    turnstileRenderErrorCode: null,
+    patChallengeFailed: false,
+    apolloCookieCount: 4,
+    cloudflareCookieNames: ['__cf_bm'],
+  }, 'after-solve', {
+    apolloCookieCount: 4,
+    cloudflareCookieNames: ['__cf_bm'],
+  });
+
+  assert.equal(result, 'cookies_unchanged');
 });

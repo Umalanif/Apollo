@@ -1,14 +1,19 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Page } from 'playwright';
+import { getPageDiagnosticsSnapshot } from './browser-diagnostics';
 import type { ChallengeDetection } from './challenge-detector';
 import type { ApolloBrowserConfig } from './browser-config';
 import {
+  type AutomationSignals,
+  type ManualChallengeState,
+  type TurnstileWidgetState,
   readAutomationSignalsScript,
   readManualChallengeStateScript,
   readTurnstileWidgetStateScript,
 } from './browser-context';
 import { logger } from './logger';
+import { safePageEvaluate, safePageScreenshot, safePageUrl } from './playwright-helpers';
 import { getProxyFingerprint } from './proxy';
 
 export type ChallengeSolveMode = 'manual' | '2captcha';
@@ -17,6 +22,10 @@ export type PostSolveOutcome =
   | 'challenge_cleared'
   | 'challenge_still_present'
   | 'verification_failed'
+  | 'turnstile_render_failed'
+  | 'pat_401'
+  | 'cookies_unchanged'
+  | 'cookies_improved_but_blocked'
   | 'redirected'
   | 'api_still_blocked'
   | 'unknown';
@@ -53,6 +62,13 @@ export interface ChallengeForensicsRecord {
   widgetPresent: boolean;
   hasCloudflare: boolean;
   hasTurnstile: boolean;
+  apolloCookieCount: number;
+  apolloCookieNames: string[];
+  cloudflareCookieNames: string[];
+  hasCfBm: boolean;
+  hasCfClearance: boolean;
+  apolloCookieDelta: number | null;
+  cloudflareCookieDelta: number | null;
   hasVerificationFailedText: boolean;
   navigatorWebdriver: boolean | null;
   automationGlobals: string[];
@@ -61,6 +77,8 @@ export interface ChallengeForensicsRecord {
   language: string | null;
   languages: string[];
   timezone: string | null;
+  turnstileRenderErrorCode: string | null;
+  patChallengeFailed: boolean;
   proxyFingerprint: string;
   outcome: PostSolveOutcome;
   screenshotPath: string | null;
@@ -75,6 +93,11 @@ interface PageChallengeSnapshot {
   widgetPresent: boolean;
   hasTurnstile: boolean;
   hasCloudflare: boolean;
+  apolloCookieCount: number;
+  apolloCookieNames: string[];
+  cloudflareCookieNames: string[];
+  hasCfBm: boolean;
+  hasCfClearance: boolean;
   sitekey: string | null;
   action: string | null;
   data: string | null;
@@ -86,6 +109,8 @@ interface PageChallengeSnapshot {
   language: string | null;
   languages: string[];
   timezone: string | null;
+  turnstileRenderErrorCode: string | null;
+  patChallengeFailed: boolean;
 }
 
 function isCloudflareChallengeUrl(value: string | null | undefined): boolean {
@@ -130,7 +155,10 @@ async function captureChallengeScreenshot(page: Page, jobId: string, phase: Chal
     const logsDir = path.resolve('logs');
     await mkdir(logsDir, { recursive: true });
     const filePath = path.join(logsDir, `${jobId}-challenge-${phase}-${Date.now()}.png`);
-    await page.screenshot({ path: filePath, fullPage: true });
+    const screenshot = await safePageScreenshot(page, { path: filePath, fullPage: true });
+    if (!screenshot) {
+      return null;
+    }
     return filePath;
   } catch (err) {
     logger.warn({ jobId, phase, err: err instanceof Error ? err.message : String(err) }, 'Failed to capture challenge screenshot');
@@ -140,58 +168,120 @@ async function captureChallengeScreenshot(page: Page, jobId: string, phase: Chal
 
 async function collectPageChallengeSnapshot(page: Page): Promise<PageChallengeSnapshot> {
   const [manualState, widgetState, automationSignals] = await Promise.all([
-    page.evaluate(readManualChallengeStateScript),
-    page.evaluate(readTurnstileWidgetStateScript),
-    page.evaluate(readAutomationSignalsScript),
+    safePageEvaluate<ManualChallengeState>(page, readManualChallengeStateScript),
+    safePageEvaluate<TurnstileWidgetState>(page, readTurnstileWidgetStateScript),
+    safePageEvaluate<AutomationSignals>(page, readAutomationSignalsScript),
   ]);
 
-  let challengeFrameUrl: string | null = null;
-  for (const frame of page.frames()) {
-    if (frame === page.mainFrame()) {
-      continue;
-    }
+  const safeManualState = manualState ?? {
+    hasTurnstile: false,
+    hasCloudflare: false,
+    currentUrl: safePageUrl(page) ?? '',
+  };
+  const safeWidgetState = widgetState ?? {
+    sitekey: null,
+    action: null,
+    cData: null,
+    chlPageData: null,
+  };
+  const safeAutomationSignals = automationSignals ?? {
+    navigatorWebdriver: null,
+    automationGlobals: [],
+    controlledByAutomationBanner: false,
+    userAgent: '',
+    language: null,
+    languages: [],
+    timezone: null,
+  };
 
-    const frameUrl = frame.url();
-    if (isCloudflareChallengeUrl(frameUrl)) {
-      challengeFrameUrl = frameUrl;
-      break;
+  let challengeFrameUrl: string | null = null;
+  if (!page.isClosed()) {
+    for (const frame of page.frames()) {
+      if (frame === page.mainFrame()) {
+        continue;
+      }
+
+      const frameUrl = frame.url();
+      if (isCloudflareChallengeUrl(frameUrl)) {
+        challengeFrameUrl = frameUrl;
+        break;
+      }
     }
   }
 
-  const challengeIframeSrc = await page.locator('iframe[src*="challenges.cloudflare.com"], iframe[src*="/cdn-cgi/challenge-platform/"]').first()
-    .getAttribute('src')
-    .catch(() => null);
+  const challengeIframeSrc = page.isClosed()
+    ? null
+    : await page.locator('iframe[src*="challenges.cloudflare.com"], iframe[src*="/cdn-cgi/challenge-platform/"]').first()
+      .getAttribute('src')
+      .catch(() => null);
 
-  const hasVerificationFailedText = await page.evaluate(() => {
+  const hasVerificationFailedText = await safePageEvaluate<boolean>(page, () => {
     const bodyText = (document.body?.innerText ?? '').toLowerCase();
     return bodyText.includes('verification failed');
-  }).catch(() => false);
+  }) ?? false;
+  const currentPageUrl = safePageUrl(page) ?? safeManualState.currentUrl;
+  const cookies = page.isClosed()
+    ? []
+    : await page.context().cookies(currentPageUrl.includes('apollo.io') ? currentPageUrl : 'https://app.apollo.io/');
+  const apolloCookies = cookies.filter(cookie => cookie.domain === 'apollo.io' || cookie.domain.endsWith('.apollo.io'));
+  const apolloCookieNames = [...new Set(apolloCookies.map(cookie => cookie.name))].sort();
+  const cloudflareCookieNames = apolloCookieNames.filter(name => name.startsWith('__cf'));
+  const diagnostics = getPageDiagnosticsSnapshot(page);
 
   return {
-    currentPageUrl: page.url(),
+    currentPageUrl,
     challengeFrameUrl,
     challengeIframeSrc,
     hasVerificationFailedText,
-    widgetPresent: Boolean(widgetState.sitekey || manualState.hasTurnstile || challengeIframeSrc),
-    hasTurnstile: manualState.hasTurnstile,
-    hasCloudflare: manualState.hasCloudflare,
-    sitekey: widgetState.sitekey,
-    action: widgetState.action,
-    data: widgetState.cData,
-    pagedata: widgetState.chlPageData,
-    navigatorWebdriver: automationSignals.navigatorWebdriver,
-    automationGlobals: automationSignals.automationGlobals,
-    controlledByAutomationBanner: automationSignals.controlledByAutomationBanner,
-    userAgent: automationSignals.userAgent,
-    language: automationSignals.language,
-    languages: automationSignals.languages,
-    timezone: automationSignals.timezone,
+    widgetPresent: Boolean(safeWidgetState.sitekey || safeManualState.hasTurnstile || challengeIframeSrc),
+    hasTurnstile: safeManualState.hasTurnstile,
+    hasCloudflare: safeManualState.hasCloudflare,
+    apolloCookieCount: apolloCookies.length,
+    apolloCookieNames,
+    cloudflareCookieNames,
+    hasCfBm: apolloCookieNames.includes('__cf_bm'),
+    hasCfClearance: apolloCookieNames.includes('cf_clearance'),
+    sitekey: safeWidgetState.sitekey,
+    action: safeWidgetState.action,
+    data: safeWidgetState.cData,
+    pagedata: safeWidgetState.chlPageData,
+    navigatorWebdriver: safeAutomationSignals.navigatorWebdriver,
+    automationGlobals: safeAutomationSignals.automationGlobals,
+    controlledByAutomationBanner: safeAutomationSignals.controlledByAutomationBanner,
+    userAgent: safeAutomationSignals.userAgent,
+    language: safeAutomationSignals.language,
+    languages: safeAutomationSignals.languages,
+    timezone: safeAutomationSignals.timezone,
+    turnstileRenderErrorCode: diagnostics.turnstileRenderErrorCode,
+    patChallengeFailed: diagnostics.patChallengeFailed,
   };
 }
 
-function derivePostSolveOutcome(snapshot: PageChallengeSnapshot, phase: ChallengePhase): PostSolveOutcome {
+export function derivePostSolveOutcome(
+  snapshot: Pick<
+    PageChallengeSnapshot,
+    'hasVerificationFailedText'
+    | 'hasTurnstile'
+    | 'hasCloudflare'
+    | 'currentPageUrl'
+    | 'turnstileRenderErrorCode'
+    | 'patChallengeFailed'
+    | 'apolloCookieCount'
+    | 'cloudflareCookieNames'
+  >,
+  phase: ChallengePhase,
+  baseline?: Pick<ChallengeForensicsRecord, 'apolloCookieCount' | 'cloudflareCookieNames'> | null,
+): PostSolveOutcome {
   if (phase === 'before-solve') {
     return 'unknown';
+  }
+
+  if (snapshot.turnstileRenderErrorCode) {
+    return 'turnstile_render_failed';
+  }
+
+  if (snapshot.patChallengeFailed) {
+    return 'pat_401';
   }
 
   if (snapshot.hasVerificationFailedText) {
@@ -204,6 +294,17 @@ function derivePostSolveOutcome(snapshot: PageChallengeSnapshot, phase: Challeng
 
   if (snapshot.currentPageUrl && !snapshot.currentPageUrl.includes('app.apollo.io')) {
     return 'redirected';
+  }
+
+  if (baseline) {
+    if (
+      snapshot.apolloCookieCount === baseline.apolloCookieCount
+      && snapshot.cloudflareCookieNames.length === baseline.cloudflareCookieNames.length
+    ) {
+      return 'cookies_unchanged';
+    }
+
+    return 'cookies_improved_but_blocked';
   }
 
   return 'challenge_still_present';
@@ -231,6 +332,7 @@ export async function recordChallengeForensics(params: {
   browserConfig: ApolloBrowserConfig;
   fallbackUrl: string;
   outcome?: PostSolveOutcome;
+  baselineRecord?: ChallengeForensicsRecord | null;
 }): Promise<ChallengeForensicsRecord> {
   const snapshot = await collectPageChallengeSnapshot(params.page);
   const screenshotPath = await captureChallengeScreenshot(params.page, params.jobId, params.phase);
@@ -250,7 +352,7 @@ export async function recordChallengeForensics(params: {
     phase: params.phase,
     browser: params.browserConfig.name,
     browserLabel: params.browserConfig.launchLabel,
-    topLevelPageUrl: params.page.url(),
+    topLevelPageUrl: safePageUrl(params.page) ?? '',
     currentPageUrl: snapshot.currentPageUrl,
     challengeFrameUrl: snapshot.challengeFrameUrl,
     challengeIframeSrc: snapshot.challengeIframeSrc,
@@ -263,6 +365,15 @@ export async function recordChallengeForensics(params: {
     widgetPresent: snapshot.widgetPresent,
     hasCloudflare: snapshot.hasCloudflare,
     hasTurnstile: snapshot.hasTurnstile,
+    apolloCookieCount: snapshot.apolloCookieCount,
+    apolloCookieNames: snapshot.apolloCookieNames,
+    cloudflareCookieNames: snapshot.cloudflareCookieNames,
+    hasCfBm: snapshot.hasCfBm,
+    hasCfClearance: snapshot.hasCfClearance,
+    apolloCookieDelta: params.baselineRecord ? snapshot.apolloCookieCount - params.baselineRecord.apolloCookieCount : null,
+    cloudflareCookieDelta: params.baselineRecord
+      ? snapshot.cloudflareCookieNames.length - params.baselineRecord.cloudflareCookieNames.length
+      : null,
     hasVerificationFailedText: snapshot.hasVerificationFailedText,
     navigatorWebdriver: snapshot.navigatorWebdriver,
     automationGlobals: snapshot.automationGlobals,
@@ -271,8 +382,10 @@ export async function recordChallengeForensics(params: {
     language: snapshot.language,
     languages: snapshot.languages,
     timezone: snapshot.timezone,
+    turnstileRenderErrorCode: snapshot.turnstileRenderErrorCode,
+    patChallengeFailed: snapshot.patChallengeFailed,
     proxyFingerprint: getProxyFingerprint(),
-    outcome: params.outcome ?? derivePostSolveOutcome(snapshot, params.phase),
+    outcome: params.outcome ?? derivePostSolveOutcome(snapshot, params.phase, params.baselineRecord),
     screenshotPath,
     recordedAt: new Date().toISOString(),
   };
@@ -289,6 +402,12 @@ export async function recordChallengeForensics(params: {
       screenshotPath,
       resolvedPageUrl: record.resolvedPageUrl,
       resolvedPageUrlSource: record.resolvedPageUrlSource,
+      hasCfBm: record.hasCfBm,
+      hasCfClearance: record.hasCfClearance,
+      apolloCookieDelta: record.apolloCookieDelta,
+      cloudflareCookieDelta: record.cloudflareCookieDelta,
+      turnstileRenderErrorCode: record.turnstileRenderErrorCode,
+      patChallengeFailed: record.patChallengeFailed,
       navigatorWebdriver: record.navigatorWebdriver,
       automationGlobals: record.automationGlobals,
       controlledByAutomationBanner: record.controlledByAutomationBanner,

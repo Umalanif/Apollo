@@ -14,6 +14,7 @@ export interface ChallengeDetection {
   type: ChallengeType;
   sitekey: string | null;
   message: string;
+  source?: 'page_dom' | 'api_response';
 }
 
 export async function detectChallenge(page: Page): Promise<ChallengeDetection> {
@@ -31,7 +32,7 @@ export async function detectChallenge(page: Page): Promise<ChallengeDetection> {
   }
 
   if (!detectedType) {
-    return { type: null, sitekey: null, message: 'No challenge detected' };
+    return { type: null, sitekey: null, message: 'No challenge detected', source: 'page_dom' };
   }
 
   const messages: Record<NonNullable<ChallengeType>, string> = {
@@ -55,5 +56,5 @@ export async function detectChallenge(page: Page): Promise<ChallengeDetection> {
     `[Challenge] ${messages[detectedType]}`,
   );
 
-  return { type: detectedType, sitekey, message: messages[detectedType] };
+  return { type: detectedType, sitekey, message: messages[detectedType], source: 'page_dom' };
 }

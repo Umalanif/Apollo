@@ -11,6 +11,7 @@
     "smoke": "tsx src/smokeTest.ts",
     "debug:egress": "tsx src/debug-egress.ts",
     "debug:trust": "tsx src/debug-trust.ts",
+    "test": "tsx --test src/*.test.ts",
     "test:turnstile": "tsx --test src/challenge-forensics.test.ts",
     "create-job": "node create-job.js",
     "db:push": "npx prisma db push",

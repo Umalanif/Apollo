@@ -2,8 +2,10 @@ const http = require('http');
 
 const data = JSON.stringify({
   targeting: {
-    titles: ["engineer"],
-    locations: ["United States"]
+    titles: ["Engineer"],
+    locations: ["United States"],
+    organizationNumEmployeesRanges: ["51,100", "101,200"],
+    organizationIndustryTagIds: ["5567cd4e7369643b70010000"]
   }
 });
 

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { LeadInput } from './env/schema';
-import { ApolloResponseError, type ApolloResponseMeta } from './errors';
+import { ApolloResponseError, type ApolloResponseMeta, QueryTooBroadError } from './errors';
 import { logger } from './logger';
 
 const ApolloOrganizationSchema = z.object({
@@ -25,6 +25,8 @@ const ApolloPeopleResponseSchema = z.object({
 }).passthrough();
 
 const ApolloMetadataResponseSchema = z.object({
+  partial_results_only: z.boolean().optional(),
+  partial_results_limit: z.number().optional(),
   pagination: z.object({
     page: z.number().optional(),
     per_page: z.number().optional(),
@@ -35,6 +37,18 @@ const ApolloMetadataResponseSchema = z.object({
   pipeline_total: z.number().optional(),
   faceting: z.record(z.string(), z.unknown()).optional(),
 }).passthrough();
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function formatRawKeys(raw: unknown): string[] {
+  if (!isRecord(raw)) {
+    return [];
+  }
+
+  return Object.keys(raw).sort();
+}
 
 function buildLocation(person: z.infer<typeof ApolloPersonSchema>): string | undefined {
   const parts = [person.city, person.state, person.country]
@@ -115,7 +129,71 @@ function detectChallengeType(raw: unknown, responseMeta: ApolloResponseMeta): st
   return null;
 }
 
+export function getApolloMetadataTotals(raw: z.infer<typeof ApolloMetadataResponseSchema>): {
+  totalEntries: number | null;
+  pipelineTotal: number | null;
+} {
+  return {
+    totalEntries: raw.pagination?.total_entries ?? null,
+    pipelineTotal: raw.pipeline_total ?? null,
+  };
+}
+
+export function isApolloQueryTooBroad(
+  raw: z.infer<typeof ApolloMetadataResponseSchema>,
+  threshold: number,
+): boolean {
+  const totals = getApolloMetadataTotals(raw);
+  return [totals.totalEntries, totals.pipelineTotal].some(value => typeof value === 'number' && value >= threshold);
+}
+
+export function assertApolloQueryNotTooBroad(
+  raw: z.infer<typeof ApolloMetadataResponseSchema>,
+  responseMeta: ApolloResponseMeta,
+  threshold: number,
+): void {
+  if (!isApolloQueryTooBroad(raw, threshold)) {
+    return;
+  }
+
+  const { totalEntries, pipelineTotal } = getApolloMetadataTotals(raw);
+  throw new QueryTooBroadError(
+    `Apollo query is too broad and stayed in metadata-only mode (threshold ${threshold})`,
+    responseMeta,
+    threshold,
+    totalEntries,
+    pipelineTotal,
+    [
+      `total_entries: ${totalEntries ?? 'missing'}`,
+      `pipeline_total: ${pipelineTotal ?? 'missing'}`,
+      'Refine targeting with narrower location, company, or seniority filters.',
+    ],
+  );
+}
+
 export function parseApolloPeopleResponse(jobId: string, raw: unknown, responseMeta: ApolloResponseMeta): LeadInput[] {
+  if (!isRecord(raw) || !('people' in raw)) {
+    const rawKeys = formatRawKeys(raw);
+
+    logger.warn(
+      {
+        jobId,
+        responseMeta,
+        rawKeys,
+      },
+      'Apollo people response is missing the people key',
+    );
+
+    throw new ApolloResponseError(
+      'Apollo returned metadata/non-people response: missing "people" key',
+      responseMeta,
+      [
+        `responseUrl: ${responseMeta.responseUrl}`,
+        `raw keys: ${rawKeys.join(', ') || '(none)'}`,
+      ],
+    );
+  }
+
   const parsed = ApolloPeopleResponseSchema.safeParse(raw);
 
   if (!parsed.success) {
@@ -205,6 +283,8 @@ export function parseApolloMetadataResponse(
       jobId,
       page: parsed.data.pagination?.page,
       totalEntries: parsed.data.pagination?.total_entries,
+      pipelineTotal: parsed.data.pipeline_total,
+      partialResultsOnly: parsed.data.partial_results_only,
     },
     'Parsed Apollo metadata response',
   );
