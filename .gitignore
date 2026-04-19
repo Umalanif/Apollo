@@ -6,29 +6,48 @@ dist/
 build/
 out/
 
-# Environment files (secrets, credentials)
+# Environment files
 .env
 .env.*
-.env.local
-.env.development
-.env.production
-*.env
 !.env.example
 
-# Logs
+# Logs and diagnostics
 logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+debug-ms-flow-*.png
+trust-report-*.json
+*-challenge-before-solve*.json
+*-challenge-after-solve*.json
 
 # Runtime data
+exports/
+storage/
+runtime/
+data/
+results/
+output/
 pids/
 *.pid
-*.seed
 *.pid.lock
+*.seed
 
-# Editor directories and files
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+*.mdb
+*.accdb
+
+# Temporary files
+.cache/
+tmp/
+temp/
+*.tmp
+
+# Editors and OS files
 .vscode/
 .idea/
 *.swp
@@ -36,32 +55,10 @@ pids/
 *~
 .DS_Store
 
-# Generated/api response files (may contain sensitive data)
-
-
-# Cache and temporary files
-.cache/
-tmp/
-temp/
-*.tmp
-
-# User-specific files
+# Local overrides
 *.local
 config.local.*
 
-# Databases (user-specific, contain parsed data)
-*.db
-*.sqlite
-*.sqlite3
-*.mdb
-*.accdb
-
-# Parsing results (generated data, not part of source)
-exports/
-storage/
-data/
-results/
-output/
-*.json       # may contain parsed results
-*.csv        # may contain parsed results
-*.xml        # may contain parsed results
+# Generated exports
+*.csv
+*.xml

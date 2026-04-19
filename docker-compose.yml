@@ -1,0 +1,17 @@
+services:
+  apollo-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: apollo-scraper:latest
+    env_file:
+      - .env
+    environment:
+      TARGETING_FILE: /app/runtime/targeting.json
+      JOB_ID: docker-compose-run
+      MAX_LEADS: 10
+    volumes:
+      - ./examples/targeting.example.json:/app/runtime/targeting.json:ro
+      - ./logs:/app/logs
+      - ./exports:/app/exports
+      - ./storage:/app/storage

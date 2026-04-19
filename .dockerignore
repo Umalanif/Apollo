@@ -1,0 +1,25 @@
+node_modules
+dist
+.git
+.github
+logs
+exports
+storage
+runtime
+.env
+.env.*
+!.env.example
+coverage
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+another header.txt
+headers.txt
+search.html
+search.js
+search.json
+search_Cloude.js
+search_metadata_mode.js
+search_metadata_mode.json
+cookie.json
+tmp-targeting-engineer-us-10.json
