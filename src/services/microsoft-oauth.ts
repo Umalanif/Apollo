@@ -35,6 +35,7 @@ const STAY_SIGNED_IN_PATTERNS = [
   'angemeldet bleiben',
   'signed in',
 ];
+const DECLINE_PATTERNS = ['no', 'nein'];
 const ACCEPT_PATTERNS = ['yes', 'ja'];
 
 type FlowStep =
@@ -245,9 +246,12 @@ async function handleStaySignedIn(page: Page, hooks: Hooks): Promise<void> {
   }
 
   try {
-    const localizedPrimaryButton = await findFirstVisibleByText(page, selectors.staySignedInButton, ACCEPT_PATTERNS);
+    const localizedDeclineButton = await findFirstVisibleByText(page, selectors.staySignedInButton, DECLINE_PATTERNS);
+    const fallbackDeclineButton = page.locator('#idBtn_Back').first();
     const fallbackPrimaryButton = page.locator('#idSIButton9').first();
-    const targetButton = localizedPrimaryButton
+    const targetButton = localizedDeclineButton
+      ?? ((await fallbackDeclineButton.isVisible().catch(() => false)) ? fallbackDeclineButton : null)
+      ?? await findFirstVisibleByText(page, selectors.staySignedInButton, ACCEPT_PATTERNS)
       ?? ((await fallbackPrimaryButton.isVisible().catch(() => false)) ? fallbackPrimaryButton : null);
 
     if (!targetButton) {
@@ -256,7 +260,7 @@ async function handleStaySignedIn(page: Page, hooks: Hooks): Promise<void> {
     }
 
     await targetButton.click();
-    await hooks.onStep?.('kmsi', 'Accepted KMSI');
+    await hooks.onStep?.('kmsi', targetButton === fallbackPrimaryButton ? 'Accepted KMSI' : 'Declined KMSI');
   } catch (error) {
     await hooks.onRecoverableStepError?.('kmsi', error);
   }

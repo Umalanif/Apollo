@@ -9,6 +9,7 @@
     "dev": "npm run build && tsx watch src/index.ts",
     "worker": "tsx src/worker-cli.ts",
     "smoke": "tsx src/smokeTest.ts",
+    "login:steps": "tsx src/login-steps.ts",
     "debug:egress": "tsx src/debug-egress.ts",
     "debug:trust": "tsx src/debug-trust.ts",
     "test": "tsx --test src/*.test.ts",

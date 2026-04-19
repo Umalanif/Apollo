@@ -2,7 +2,7 @@ import type { Page } from 'playwright';
 import { readApolloSessionForensicsScript, readManualChallengeStateScript } from './browser-context';
 import { extractSessionAuth } from './extractor';
 import { logger } from './logger';
-import { safePageEvaluate, safePageUrl, safePageWaitForTimeout } from './playwright-helpers';
+import { safePageCookies, safePageEvaluate, safePageUrl, safePageWaitForTimeout } from './playwright-helpers';
 
 const SESSION_BLOCK_PATTERNS = [
   'for security reasons, microsoft logged the account out',
@@ -150,7 +150,7 @@ export async function warmupApolloSession(page: Page, jobId: string): Promise<Ap
 
     const auth = await extractSessionAuth(page);
     const currentUrl = safePageUrl(page) ?? 'https://app.apollo.io/';
-    const cookies = await page.context().cookies(currentUrl.includes('apollo.io') ? currentUrl : 'https://app.apollo.io/');
+    const cookies = await safePageCookies(page, currentUrl.includes('apollo.io') ? currentUrl : 'https://app.apollo.io/');
     lastCookieSummary = summarizeApolloCookies(cookies);
     const challengeState = await safePageEvaluate<{
       hasTurnstile: boolean;
@@ -239,7 +239,11 @@ export async function warmupApolloSession(page: Page, jobId: string): Promise<Ap
 }
 
 export async function runApolloSessionPreflight(page: Page): Promise<ApolloSessionPreflight> {
-  const pageState = await page.evaluate(() => {
+  const pageState = await safePageEvaluate<{
+    url: string;
+    title: string;
+    bodyText: string;
+  }>(page, () => {
     const bodyText = (document.body?.innerText ?? '').toLowerCase();
     return {
       url: window.location.href,
@@ -247,25 +251,35 @@ export async function runApolloSessionPreflight(page: Page): Promise<ApolloSessi
       bodyText,
     };
   });
+  const currentUrl = safePageUrl(page) ?? 'about:blank';
+  const effectivePageState = pageState ?? {
+    url: currentUrl,
+    title: '',
+    bodyText: '',
+  };
 
   const sessionAuth = await extractSessionAuth(page);
-  const cookies = await page.context().cookies(pageState.url.includes('apollo.io') ? pageState.url : 'https://app.apollo.io/');
+  const cookies = await safePageCookies(page, effectivePageState.url.includes('apollo.io') ? effectivePageState.url : 'https://app.apollo.io/');
   const cookieSummary = summarizeApolloCookies(cookies);
   const challengeState = await safePageEvaluate<{
     hasTurnstile: boolean;
     hasCloudflare: boolean;
   }>(page, readManualChallengeStateScript);
   const blockers: string[] = [];
-  const lowerUrl = pageState.url.toLowerCase();
-  const lowerTitle = pageState.title.toLowerCase();
-  const combinedText = `${lowerUrl}\n${lowerTitle}\n${pageState.bodyText}`;
+  const lowerUrl = effectivePageState.url.toLowerCase();
+  const lowerTitle = effectivePageState.title.toLowerCase();
+  const combinedText = `${lowerUrl}\n${lowerTitle}\n${effectivePageState.bodyText}`;
 
-  if (!isApolloAppUrl(pageState.url)) {
-    blockers.push(`Apollo app route not active: ${pageState.url}`);
+  if (!pageState) {
+    blockers.push('Page closed before Apollo session preflight completed');
   }
 
-  if (!isApolloPeopleUrl(pageState.url)) {
-    blockers.push(`Apollo people route not active: ${pageState.url}`);
+  if (!isApolloAppUrl(effectivePageState.url)) {
+    blockers.push(`Apollo app route not active: ${effectivePageState.url}`);
+  }
+
+  if (!isApolloPeopleUrl(effectivePageState.url)) {
+    blockers.push(`Apollo people route not active: ${effectivePageState.url}`);
   }
 
   if (
@@ -273,7 +287,7 @@ export async function runApolloSessionPreflight(page: Page): Promise<ApolloSessi
     lowerUrl.includes('login.live.com') ||
     lowerUrl.includes('microsoftonline.com')
   ) {
-    blockers.push(`Microsoft interstitial still active: ${pageState.url}`);
+    blockers.push(`Microsoft interstitial still active: ${effectivePageState.url}`);
   }
 
   for (const pattern of SESSION_BLOCK_PATTERNS) {
@@ -295,8 +309,8 @@ export async function runApolloSessionPreflight(page: Page): Promise<ApolloSessi
   }
 
   return {
-    pageUrl: pageState.url,
-    pageTitle: pageState.title,
+    pageUrl: effectivePageState.url,
+    pageTitle: effectivePageState.title,
     csrfTokenPresent: Boolean(sessionAuth.csrfToken),
     apolloCookieCount: cookieSummary.apolloCookieCount,
     apolloCookieNames: cookieSummary.apolloCookieNames,

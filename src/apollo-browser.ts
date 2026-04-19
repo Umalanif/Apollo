@@ -1,5 +1,11 @@
 import type { Page } from 'playwright';
-import { installAutomationMaskScript, installTurnstileObserverScript } from './browser-context';
+import {
+  buildAcceptLanguageHeader,
+  buildLocaleLanguages,
+  buildSyntheticSpeechVoices,
+  installAutomationMaskScript,
+} from './browser-context';
+import { getApolloBrowserConfig } from './browser-config';
 import { getEnv } from './env/schema';
 
 function normalizeApolloLocale(locale: string | undefined): string {
@@ -50,8 +56,6 @@ const TRUSTED_HOST_PATTERNS = [
   'challenges.cloudflare.com',
   'google.com',
   'gstatic.com',
-  'recaptcha.net',
-  'hcaptcha.com',
   ...MICROSOFT_AUTH_HOST_PATTERNS,
 ];
 
@@ -68,8 +72,15 @@ function isTrustedHost(hostname: string): boolean {
 }
 
 export async function configureApolloPage(page: Page): Promise<void> {
-  await page.addInitScript(installAutomationMaskScript);
-  await page.addInitScript(installTurnstileObserverScript);
+  const browserConfig = getApolloBrowserConfig();
+  await page.setExtraHTTPHeaders({
+    'accept-language': buildAcceptLanguageHeader(browserConfig.locale),
+  });
+  await page.addInitScript(installAutomationMaskScript, {
+    locale: browserConfig.locale,
+    languages: buildLocaleLanguages(browserConfig.locale),
+    speechVoices: buildSyntheticSpeechVoices(browserConfig.locale),
+  });
 
   await page.route('**/*', async route => {
     const request = route.request();

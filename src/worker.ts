@@ -2,14 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import type { Page } from 'playwright';
 import { isMainThread, parentPort, workerData } from 'worker_threads';
-import { getApolloBrowserConfig } from './browser-config';
-import {
-  injectChallengeTokenScript,
-  readManualChallengeStateScript,
-  readTurnstileWidgetStateScript,
-} from './browser-context';
-import { recordChallengeForensics, resolveTurnstilePageUrl } from './challenge-forensics';
-import { solveCloudflareTurnstile, solveRecaptcha } from './captcha-solver';
+import { readManualChallengeStateScript } from './browser-context';
 import type { ChallengeDetection } from './challenge-detector';
 import { createCrawler } from './crawler';
 import { saveLead } from './db/db.service';
@@ -26,13 +19,14 @@ import { exportLeads } from './export';
 import { parseApolloPeopleResponse } from './leads-scraper';
 import { logger } from './logger';
 import { APOLLO_LOGIN_URL } from './apollo-browser';
-import { isTargetClosedError, safePageEvaluate, safePageUrl, safePageWaitForTimeout } from './playwright-helpers';
+import { isTargetClosedError, safePageEvaluate, safePageUrl } from './playwright-helpers';
 import { getProxyConfig } from './proxy';
 import type { Targeting } from './targeting';
 
 export interface WorkerData {
   jobId: string;
   targeting: Targeting;
+  maxLeads?: number;
 }
 
 interface ProgressMessage {
@@ -66,18 +60,19 @@ async function waitForManualChallengeResolution(
   page: Page,
   jobId: string,
   challengeType: string,
-  timeoutMs = 180_000,
+  timeoutMs = 120_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  const closedMessage = `Browser page was closed while waiting for manual ${challengeType} challenge resolution`;
 
   logger.warn(
     { jobId, challengeType, timeoutMs },
-    'Manual CAPTCHA step required in browser; waiting for challenge to be cleared',
+    'CAPTCHA_REQUIRED',
   );
 
   while (Date.now() < deadline) {
     if (page.isClosed()) {
-      throw new Error('Browser page was closed while waiting for manual CAPTCHA resolution');
+      throw new EnvironmentTrustError(closedMessage, 'manual_challenge_page_closed');
     }
 
     const detection = await safePageEvaluate<{
@@ -86,7 +81,7 @@ async function waitForManualChallengeResolution(
       currentUrl: string;
     }>(page, readManualChallengeStateScript);
     if (!detection) {
-      throw new Error('Browser page was closed while waiting for manual CAPTCHA resolution');
+      throw new EnvironmentTrustError(closedMessage, 'manual_challenge_page_closed');
     }
 
     if (!detection.hasTurnstile && !detection.hasCloudflare) {
@@ -100,14 +95,10 @@ async function waitForManualChallengeResolution(
     await sleep(2_000);
   }
 
-  throw new Error(`Timed out waiting for manual ${challengeType} challenge resolution`);
-}
-
-async function injectChallengeToken(page: Page, token: string): Promise<void> {
-  const result = await safePageEvaluate(page, injectChallengeTokenScript, token);
-  if (result === null && page.isClosed()) {
-    throw new Error('Browser page closed before challenge token injection could complete');
-  }
+  throw new EnvironmentTrustError(
+    `Timed out waiting for manual ${challengeType} challenge resolution`,
+    'manual_challenge_timeout',
+  );
 }
 
 export function buildPeopleSearchUrl(targeting: WorkerData['targeting']): string {
@@ -165,7 +156,6 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
   const prisma = new PrismaClient();
   let activeCrawler: Awaited<ReturnType<typeof createCrawler>> | null = null;
   let shuttingDown = false;
-  const browserConfig = getApolloBrowserConfig();
 
   const shutdown = async (signal?: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) {
@@ -205,6 +195,9 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
     let challengeRetryCount = 0;
     let launchAttempt = 0;
     let saved = 0;
+    const maxLeads = typeof data.maxLeads === 'number' && data.maxLeads > 0
+      ? Math.floor(data.maxLeads)
+      : null;
 
     logger.info(
       {
@@ -229,118 +222,22 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
             `Challenge detected: ${detection.message}`,
           );
 
-          if (detection.type === 'turnstile') {
-            const preSolveRecord = await recordChallengeForensics({
-              page,
-              jobId: data.jobId,
-              detection,
-              solveMode: detection.sitekey ? '2captcha' : 'manual',
-              phase: 'before-solve',
-              browserConfig,
-              fallbackUrl: url,
-            });
-            const turnstileState = await safePageEvaluate<{
-              sitekey: string | null;
-              action: string | null;
-              cData: string | null;
-              chlPageData: string | null;
-            }>(page, readTurnstileWidgetStateScript);
-            const sitekey = detection.sitekey ?? turnstileState?.sitekey ?? null;
-
-            if (!sitekey) {
-              await waitForManualChallengeResolution(page, data.jobId, 'turnstile');
-              const afterRecord = await recordChallengeForensics({
-                page,
-                jobId: data.jobId,
-                detection,
-                solveMode: 'manual',
-                phase: 'after-solve',
-                browserConfig,
-                fallbackUrl: url,
-                baselineRecord: preSolveRecord,
-              });
-              if (afterRecord.outcome !== 'challenge_cleared') {
-                throw new EnvironmentTrustError(
-                  `Manual Turnstile solve did not clear the challenge (${afterRecord.outcome})`,
-                  afterRecord.outcome,
-                );
-              }
-              failCount = 0;
-              return;
-            }
-
-            const userAgent = await safePageEvaluate<string>(page, () => navigator.userAgent);
-            const resolvedPageUrl = resolveTurnstilePageUrl({
-              fallbackUrl: url,
-              topLevelPageUrl: preSolveRecord.topLevelPageUrl,
-              challengeFrameUrl: preSolveRecord.challengeFrameUrl,
-              challengeIframeSrc: preSolveRecord.challengeIframeSrc,
-            });
-            const token = await solveCloudflareTurnstile(sitekey, resolvedPageUrl.pageUrl, {
-              extraOptions: {
-                action: turnstileState?.action ?? undefined,
-                data: turnstileState?.cData ?? undefined,
-                pagedata: turnstileState?.chlPageData ?? undefined,
-                useragent: userAgent ?? undefined,
-              },
-            });
-            await injectChallengeToken(page, token);
-            await safePageWaitForTimeout(page, 3_000);
-            const afterRecord = await recordChallengeForensics({
-              page,
-              jobId: data.jobId,
-              detection,
-              solveMode: '2captcha',
-              phase: 'after-solve',
-              browserConfig,
-              fallbackUrl: resolvedPageUrl.pageUrl,
-              baselineRecord: preSolveRecord,
-            });
-            if (afterRecord.outcome === 'verification_failed' || afterRecord.outcome === 'challenge_still_present') {
+          if (detection.type === 'turnstile' || detection.type === 'cloudflare') {
+            await waitForManualChallengeResolution(page, data.jobId, detection.type);
+            const challengeState = await safePageEvaluate<{
+              hasTurnstile: boolean;
+              hasCloudflare: boolean;
+            }>(page, readManualChallengeStateScript);
+            if (challengeState?.hasTurnstile || challengeState?.hasCloudflare) {
               throw new EnvironmentTrustError(
-                `Turnstile token injection completed but Apollo still failed trust checks (${afterRecord.outcome})`,
-                afterRecord.outcome,
+                `Manual ${detection.type} challenge wait finished but challenge is still present`,
+                'challenge_still_present',
               );
             }
             failCount = 0;
             return;
           }
-
-          if (detection.type === 'cloudflare') {
-            await waitForManualChallengeResolution(page, data.jobId, 'cloudflare');
-            const afterRecord = await recordChallengeForensics({
-              page,
-              jobId: data.jobId,
-              detection,
-              solveMode: 'manual',
-              phase: 'after-solve',
-              browserConfig,
-              fallbackUrl: url,
-            });
-            if (afterRecord.outcome !== 'challenge_cleared') {
-              throw new EnvironmentTrustError(
-                `Cloudflare interstitial did not clear after manual solve (${afterRecord.outcome})`,
-                afterRecord.outcome,
-              );
-            }
-            failCount = 0;
-            return;
-          }
-
-          if (detection.type !== 'recaptcha') {
-            throw new ChallengeBypassSignal(detection.type ?? 'unknown', url);
-          }
-
-          if (!detection.sitekey) {
-            throw new ChallengeBypassSignal('recaptcha', url);
-          }
-
-          const userAgent = await safePageEvaluate<string>(page, () => navigator.userAgent);
-          const token = await solveRecaptcha(detection.sitekey, url, { userAgent: userAgent ?? undefined });
-          await injectChallengeToken(page, token);
-          await safePageWaitForTimeout(page, 3_000);
-
-          failCount = 0;
+          throw new ChallengeBypassSignal(detection.type ?? 'unknown', url);
         };
 
         const onPeopleResponse = async (
@@ -356,6 +253,11 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
 
           const leads = parseApolloPeopleResponse(data.jobId, payload, responseMeta);
           for (const lead of leads) {
+            if (maxLeads !== null && saved >= maxLeads) {
+              logger.info({ jobId: data.jobId, saved, maxLeads }, 'Lead save limit reached; skipping remaining leads');
+              break;
+            }
+
             try {
               await saveLead(prisma, data.jobId, lead);
               saved++;
@@ -369,12 +271,13 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
             }
           }
 
-          post({ type: 'progress', payload: { collected: leads.length, saved } });
+          post({ type: 'progress', payload: { collected: Math.min(leads.length, maxLeads ?? leads.length), saved } });
         };
 
         activeCrawler = await createCrawler({
           jobId: data.jobId,
           launchAttempt,
+          forceFreshProfile: challengeRetryCount > 0,
           onChallengeDetected,
           onPeopleResponse,
         });
@@ -424,7 +327,7 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
             'Environment trust failure detected after challenge solve',
           );
 
-          if (challengeRetryCount >= 2) {
+          if (challengeRetryCount >= MAX_CHALLENGE_RETRIES) {
             throw new Error(
               `Environment trust failure persisted after ${challengeRetryCount} attempts on proxy ${proxyHost}:${proxyPort}: ${err.message}`,
             );
@@ -519,7 +422,7 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
         challengeRetryCount = 0;
         const message = err instanceof Error ? err.message : String(err);
         if (isTargetClosedError(err)) {
-          logger.warn({ jobId: data.jobId, launchAttempt, proxyPort }, 'Target closed during worker run; relaunching persistent profile');
+          logger.warn({ jobId: data.jobId, launchAttempt, proxyPort }, 'Target closed during worker run; relaunching fresh browser profile');
         }
         logger.error({ jobId: data.jobId, err: message, proxyPort }, 'Extraction error');
         failCount++;
@@ -548,10 +451,15 @@ export async function runWorkerJob(data: WorkerData): Promise<void> {
   }
 }
 
-export function createWorkerJobData(targeting: WorkerData['targeting'], jobId = `apollo-${randomUUID()}`): WorkerData {
+export function createWorkerJobData(
+  targeting: WorkerData['targeting'],
+  jobId = `apollo-${randomUUID()}`,
+  maxLeads?: number,
+): WorkerData {
   return {
     jobId,
     targeting,
+    maxLeads,
   };
 }
 

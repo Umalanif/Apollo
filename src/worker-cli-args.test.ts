@@ -9,12 +9,15 @@ test('parseWorkerCliArgs parses valid targeting JSON', () => {
   const result = parseWorkerCliArgs([
     '--job-id',
     'apollo-123',
+    '--max-leads',
+    '10',
     '--targeting',
     '{"titles":["Engineer"],"locations":["United States"],"organizationNumEmployeesRanges":["51,100","101,200"],"organizationIndustryTagIds":["5567cd4e7369643b70010000"]}',
   ]);
 
   assert.deepEqual(result, {
     jobId: 'apollo-123',
+    maxLeads: 10,
     targeting: {
       titles: ['Engineer'],
       locations: ['United States'],
@@ -66,6 +69,13 @@ test('parseWorkerCliArgs rejects invalid targeting JSON', () => {
   assert.throws(
     () => parseWorkerCliArgs(['--targeting', '{bad json}']),
     /Invalid JSON passed to --targeting/,
+  );
+});
+
+test('parseWorkerCliArgs rejects invalid --max-leads', () => {
+  assert.throws(
+    () => parseWorkerCliArgs(['--max-leads', '0', '--targeting', '{"titles":["Engineer"]}']),
+    /--max-leads must be a positive number/,
   );
 });
 

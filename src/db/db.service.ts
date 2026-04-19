@@ -3,8 +3,10 @@ import { LeadSchema } from '../env/schema';
 
 export interface SaveLeadResult {
   success: true;
+  inserted: boolean;
   data: {
     id: string;
+    jobId: string;
     linkedInUrl: string;
     firstName: string;
     lastName: string;
@@ -36,20 +38,33 @@ export async function saveLead(prisma: PrismaClient, jobId: string, raw: unknown
   }
 
   const data = parse.data;
-  const lead = await prisma.lead.upsert({
-    where: { linkedInUrl: data.linkedInUrl },
-    update: {
+  const existing = await prisma.lead.findFirst({
+    where: {
       jobId,
-      firstName: data.firstName,
-      lastName: data.lastName,
-      title: data.title ?? null,
-      company: data.company ?? null,
-      companyUrl: data.companyUrl ?? null,
-      location: data.location ?? null,
-      email: data.email ?? null,
-      phone: data.phone ?? null,
+      linkedInUrl: data.linkedInUrl,
     },
-    create: {
+  });
+
+  if (existing) {
+    const lead = await prisma.lead.update({
+      where: { id: existing.id },
+      data: {
+        firstName: data.firstName,
+        lastName: data.lastName,
+        title: data.title ?? null,
+        company: data.company ?? null,
+        companyUrl: data.companyUrl ?? null,
+        location: data.location ?? null,
+        email: data.email ?? null,
+        phone: data.phone ?? null,
+      },
+    });
+
+    return { success: true, inserted: false, data: lead };
+  }
+
+  const lead = await prisma.lead.create({
+    data: {
       jobId,
       linkedInUrl: data.linkedInUrl,
       firstName: data.firstName,
@@ -63,5 +78,11 @@ export async function saveLead(prisma: PrismaClient, jobId: string, raw: unknown
     },
   });
 
-  return { success: true, data: lead };
+  return { success: true, inserted: true, data: lead };
+}
+
+export async function countUniqueLeadsForJob(prisma: PrismaClient, jobId: string): Promise<number> {
+  return prisma.lead.count({
+    where: { jobId },
+  });
 }

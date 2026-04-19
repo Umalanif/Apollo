@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { derivePostSolveOutcome, resolveTurnstilePageUrl } from './challenge-forensics';
 
-test('resolveTurnstilePageUrl prefers Cloudflare challenge frame URL', () => {
+test('resolveTurnstilePageUrl always prefers top-level Apollo page URL when available', () => {
   const result = resolveTurnstilePageUrl({
     fallbackUrl: 'https://fallback.example',
     topLevelPageUrl: 'https://app.apollo.io/#/people',
@@ -10,8 +10,8 @@ test('resolveTurnstilePageUrl prefers Cloudflare challenge frame URL', () => {
     challengeIframeSrc: 'https://challenges.cloudflare.com/iframe',
   });
 
-  assert.equal(result.pageUrl, 'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov1');
-  assert.equal(result.source, 'challenge_frame_url');
+  assert.equal(result.pageUrl, 'https://app.apollo.io/#/people');
+  assert.equal(result.source, 'top_level_page_url');
 });
 
 test('resolveTurnstilePageUrl falls back to top-level Apollo page for page-rendered challenges', () => {

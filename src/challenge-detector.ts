@@ -1,13 +1,11 @@
 import type { Page } from 'playwright';
-import { detectChallengeChecksScript } from './browser-context';
+import { readManualChallengeStateScript } from './browser-context';
 import { logger } from './logger';
+import { safePageEvaluate } from './playwright-helpers';
 
 export type ChallengeType =
   | 'cloudflare'
   | 'turnstile'
-  | 'datadome'
-  | 'recaptcha'
-  | 'generic_block'
   | null;
 
 export interface ChallengeDetection {
@@ -18,43 +16,35 @@ export interface ChallengeDetection {
 }
 
 export async function detectChallenge(page: Page): Promise<ChallengeDetection> {
-  const checks = await page.evaluate(detectChallengeChecksScript);
-
-  const { results, sitekey } = checks;
-  const priority: ChallengeType[] = ['turnstile', 'cloudflare', 'datadome', 'recaptcha', 'generic_block'];
-
-  let detectedType: ChallengeType = null;
-  for (const candidate of priority) {
-    if (candidate !== null && results.includes(candidate)) {
-      detectedType = candidate;
-      break;
-    }
+  const state = await safePageEvaluate<{
+    hasTurnstile: boolean;
+    hasCloudflare: boolean;
+    currentUrl: string;
+  }>(page, readManualChallengeStateScript);
+  if (!state) {
+    return { type: null, sitekey: null, message: 'Page closed before challenge detection', source: 'page_dom' };
   }
+
+  const detectedType: ChallengeType = state.hasTurnstile
+    ? 'turnstile'
+    : (state.hasCloudflare ? 'cloudflare' : null);
 
   if (!detectedType) {
     return { type: null, sitekey: null, message: 'No challenge detected', source: 'page_dom' };
   }
 
   const messages: Record<NonNullable<ChallengeType>, string> = {
-    turnstile: sitekey
-      ? `Cloudflare Turnstile detected (sitekey: ${sitekey})`
-      : 'Cloudflare Turnstile detected (no sitekey found)',
+    turnstile: 'Cloudflare Turnstile detected',
     cloudflare: 'Cloudflare challenge / browser verification detected',
-    datadome: 'DataDome CAPTCHA challenge detected',
-    recaptcha: sitekey
-      ? `Google reCAPTCHA challenge detected (sitekey: ${sitekey})`
-      : 'Google reCAPTCHA challenge detected (no sitekey found)',
-    generic_block: 'Generic block / IP ban / rate-limit page detected',
   };
 
   logger.debug(
     {
+      currentUrl: state.currentUrl,
       type: detectedType,
-      sitekey,
-      markers: [...new Set(results)],
     },
     `[Challenge] ${messages[detectedType]}`,
   );
 
-  return { type: detectedType, sitekey, message: messages[detectedType], source: 'page_dom' };
+  return { type: detectedType, sitekey: null, message: messages[detectedType], source: 'page_dom' };
 }

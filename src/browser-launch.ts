@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { chromium, type BrowserContext } from 'playwright';
 import { getApolloBrowserConfig } from './browser-config';
@@ -9,6 +9,8 @@ import { getPlaywrightProxy, getProxyFingerprint } from './proxy';
 
 export interface LaunchApolloContextOptions {
   profileId?: string;
+  forceFreshProfile?: boolean;
+  includeCloudflareSeedCookies?: boolean;
 }
 
 function sanitizeProfileSegment(value: string): string {
@@ -21,42 +23,46 @@ function sanitizeProfileSegment(value: string): string {
 }
 
 export function resolveStableProfileId(): string {
-  const env = getEnv();
   const browserConfig = getApolloBrowserConfig();
   const credentials = getMicrosoftCredentials();
 
-  if (env.APOLLO_PROFILE_KEY_MODE === 'account-proxy-browser' || env.APOLLO_PROFILE_KEY_MODE === undefined) {
-    return [
-      sanitizeProfileSegment(credentials.email),
-      sanitizeProfileSegment(getProxyFingerprint()),
-      sanitizeProfileSegment(browserConfig.name),
-    ].join('__');
+  return [
+    sanitizeProfileSegment(credentials.email),
+    sanitizeProfileSegment(getProxyFingerprint()),
+    sanitizeProfileSegment(browserConfig.name),
+  ].join('__');
+}
+
+function resolveLaunchProfileId(reuseProfile: boolean, jobId: string, options: LaunchApolloContextOptions = {}): string {
+  if (options.profileId) {
+    return options.profileId;
   }
 
-  return sanitizeProfileSegment(credentials.email);
+  return reuseProfile ? resolveStableProfileId() : jobId;
 }
 
 export function resolveProfileDir(jobId: string, options: LaunchApolloContextOptions = {}): string {
   const browserConfig = getApolloBrowserConfig();
-  const env = getEnv();
-  const profileId = env.APOLLO_REUSE_PROFILE === false
-    ? (options.profileId ?? jobId)
-    : (options.profileId ?? resolveStableProfileId());
+  const reuseProfile = (getEnv().APOLLO_REUSE_PROFILE ?? false) && options.forceFreshProfile !== true;
+  const profileId = resolveLaunchProfileId(reuseProfile, jobId, options);
   return path.resolve('storage', `${browserConfig.name}-profile`, profileId);
 }
 
 export async function launchApolloContext(jobId: string, options: LaunchApolloContextOptions = {}): Promise<BrowserContext> {
   const browserConfig = getApolloBrowserConfig();
   const env = getEnv();
-  const profileId = env.APOLLO_REUSE_PROFILE === false
-    ? (options.profileId ?? jobId)
-    : (options.profileId ?? resolveStableProfileId());
-  const userDataDir = resolveProfileDir(jobId, { profileId });
-  await mkdir(userDataDir, { recursive: true });
+  const reuseProfile = (env.APOLLO_REUSE_PROFILE ?? false) && options.forceFreshProfile !== true;
+  const profileId = resolveLaunchProfileId(reuseProfile, jobId, options);
+  const profileRootDir = resolveProfileDir(jobId, { profileId });
+  await mkdir(profileRootDir, { recursive: true });
+  const userDataDir = reuseProfile
+    ? profileRootDir
+    : await mkdtemp(path.join(profileRootDir, 'run-'));
   const launchArgs = [
     `--lang=${browserConfig.locale}`,
     '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
     '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+    '--disable-blink-features=AutomationControlled',
   ];
 
   logger.info(
@@ -64,13 +70,18 @@ export async function launchApolloContext(jobId: string, options: LaunchApolloCo
       jobId,
       browser: browserConfig.name,
       browserChannel: browserConfig.channel ?? 'bundled',
+      profileRootDir,
       userDataDir,
       profileId,
+      reuseProfile,
+      forceFreshProfile: options.forceFreshProfile === true,
       proxy: getProxyFingerprint(),
       locale: browserConfig.locale,
       timezoneId: browserConfig.timezoneId ?? null,
     },
-    `Launching persistent ${browserConfig.launchLabel} context`,
+    reuseProfile
+      ? `Launching reusable ${browserConfig.launchLabel} context`
+      : `Launching isolated ${browserConfig.launchLabel} context`,
   );
 
   const context = await chromium.launchPersistentContext(userDataDir, {
@@ -85,7 +96,22 @@ export async function launchApolloContext(jobId: string, options: LaunchApolloCo
     viewport: { width: 1440, height: 960 },
   });
 
-  await bootstrapContextFromCookieSeed(context, jobId);
+  await bootstrapContextFromCookieSeed(context, jobId, {
+    includeCloudflareCookies: options.includeCloudflareSeedCookies ?? (reuseProfile && env.APOLLO_COOKIE_SEED_INCLUDE_CF === true),
+  });
+
+  context.on('close', () => {
+    if (reuseProfile) {
+      return;
+    }
+
+    void rm(userDataDir, { recursive: true, force: true }).catch(err => {
+      logger.warn(
+        { jobId, userDataDir, err: err instanceof Error ? err.message : String(err) },
+        'Failed to remove temporary browser profile directory',
+      );
+    });
+  });
 
   return context;
 }

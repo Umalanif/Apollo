@@ -2,6 +2,16 @@
  * Custom error types for the Apollo scraper.
  */
 
+export interface ApolloRequestCapture {
+  headers: Record<string, string>;
+  method: string;
+  postDataJson: unknown;
+  requestUrl: string;
+  responsePath: string;
+  displayMode: string | null;
+  hasTurnstileResponseHeader: boolean;
+}
+
 export interface ApolloResponseMeta {
   responseUrl: string;
   status: number;
@@ -9,6 +19,7 @@ export interface ApolloResponseMeta {
   bodyPreview: string;
   challengeSitekey?: string | null;
   challengeSource?: 'page_dom' | 'api_response' | null;
+  requestCapture?: ApolloRequestCapture;
 }
 
 /**

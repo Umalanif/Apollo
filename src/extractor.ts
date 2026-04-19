@@ -1,6 +1,7 @@
 import type { Page } from 'playwright';
 import { wrap } from './bottleneck';
 import { logger } from './logger';
+import { safePageCookies, safePageUrl } from './playwright-helpers';
 import { createProxyAgents, getMaskedProxyUrl } from './proxy';
 
 export interface SessionAuth {
@@ -36,6 +37,7 @@ type GotInstance = ReturnType<typeof import('got').got.extend>;
 const FORWARDED_HEADER_NAMES = [
   'accept',
   'accept-language',
+  'baggage',
   'content-type',
   'origin',
   'priority',
@@ -46,7 +48,10 @@ const FORWARDED_HEADER_NAMES = [
   'sec-fetch-mode',
   'sec-fetch-site',
   'sec-gpc',
+  'sentry-trace',
   'x-accept-language',
+  'x-cf-turnstile-response',
+  'x-cf-widget-type',
   'x-referer-host',
   'x-referer-path',
   'x-requested-with',
@@ -194,8 +199,9 @@ export async function loadOrganizationSnippets(
 }
 
 export async function extractSessionAuth(page: Page): Promise<SessionAuth> {
-  const currentApolloUrl = page.url().includes('apollo.io') ? page.url() : 'https://app.apollo.io/';
-  const cookies = await page.context().cookies(currentApolloUrl);
+  const currentUrl = safePageUrl(page);
+  const currentApolloUrl = currentUrl?.includes('apollo.io') ? currentUrl : 'https://app.apollo.io/';
+  const cookies = await safePageCookies(page, currentApolloUrl);
   const apolloCookies = cookies.filter(cookie => cookie.domain === 'apollo.io' || cookie.domain.endsWith('.apollo.io'));
   const csrfToken = apolloCookies.find(cookie => cookie.name === 'X-CSRF-TOKEN')?.value ?? '';
   const cookieString = apolloCookies
@@ -207,7 +213,7 @@ export async function extractSessionAuth(page: Page): Promise<SessionAuth> {
       csrfToken: csrfToken ? `${csrfToken.slice(0, 10)}...` : '',
       hasCsrfCookie: Boolean(csrfToken),
       cookieCount: apolloCookies.length,
-      pageUrl: page.url(),
+      pageUrl: currentUrl,
     },
     'Session auth extracted',
   );

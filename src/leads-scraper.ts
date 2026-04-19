@@ -109,13 +109,6 @@ function detectChallengeType(raw: unknown, responseMeta: ApolloResponseMeta): st
   }
 
   if (
-    normalized.includes('recaptcha')
-    || normalized.includes('g-recaptcha')
-  ) {
-    return 'recaptcha';
-  }
-
-  if (
     normalized.includes('access denied')
     || normalized.includes('forbidden')
     || normalized.includes('too many requests')

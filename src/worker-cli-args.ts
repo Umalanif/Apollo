@@ -5,6 +5,7 @@ import { TargetingSchema } from './targeting';
 export interface WorkerCliArgs {
   jobId?: string;
   targeting: z.infer<typeof TargetingSchema>;
+  maxLeads?: number;
 }
 
 function parseTargetingValue(targetingValue: string): unknown {
@@ -23,6 +24,7 @@ function parseTargetingValue(targetingValue: string): unknown {
 export function parseWorkerCliArgs(args: string[]): WorkerCliArgs {
   let targetingValue: string | undefined;
   let jobId: string | undefined;
+  let maxLeads: number | undefined;
 
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -57,6 +59,22 @@ export function parseWorkerCliArgs(args: string[]): WorkerCliArgs {
 
       jobId = nextValue;
       i += 1;
+      continue;
+    }
+
+    if (arg === '--max-leads') {
+      const nextValue = args[i + 1];
+      if (!nextValue || nextValue.startsWith('--')) {
+        throw new Error('Missing value after --max-leads.');
+      }
+
+      const parsedMaxLeads = Number(nextValue);
+      if (!Number.isFinite(parsedMaxLeads) || parsedMaxLeads <= 0) {
+        throw new Error('--max-leads must be a positive number.');
+      }
+
+      maxLeads = Math.floor(parsedMaxLeads);
+      i += 1;
     }
   }
 
@@ -74,5 +92,7 @@ export function parseWorkerCliArgs(args: string[]): WorkerCliArgs {
     throw new Error(`Invalid --targeting payload: ${issues}`);
   }
 
-  return { jobId, targeting: parsed.data };
+  return maxLeads === undefined
+    ? { jobId, targeting: parsed.data }
+    : { jobId, targeting: parsed.data, maxLeads };
 }

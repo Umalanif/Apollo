@@ -6,6 +6,7 @@ import {
   detectChallengeTypeFromText,
   isCanonicalPeopleSearchCapture,
   normalizePeopleSearchPayload,
+  pickActiveApolloPage,
 } from './crawler';
 
 test('detectChallengeTypeFromText classifies Turnstile HTML as challenge', () => {
@@ -27,12 +28,13 @@ test('detectChallengeTypeFromText classifies generic Cloudflare HTML as challeng
   assert.equal(result.challengeType, 'cloudflare');
 });
 
-test('resolveProfileDir reuses stable browser profile by default', () => {
+test('resolveProfileDir isolates browser profile root by job id', () => {
   const firstJob = resolveProfileDir('apollo-job-1');
   const secondJob = resolveProfileDir('apollo-job-2');
 
-  assert.equal(firstJob, secondJob);
-  assert.doesNotMatch(firstJob, /attempt-/);
+  assert.notEqual(firstJob, secondJob);
+  assert.match(firstJob, /apollo-job-1/i);
+  assert.match(secondJob, /apollo-job-2/i);
 });
 
 test('isCanonicalPeopleSearchCapture accepts explorer_mode people search and rejects metadata-mode', () => {
@@ -81,12 +83,24 @@ test('normalizePeopleSearchPayload refreshes replay-only identifiers and current
   assert.notEqual(normalized.cacheKey, 123);
 });
 
-test('buildReplayHeaders uses live auth and omits turnstile token', () => {
+test('normalizePeopleSearchPayload preserves typed custom fields derived from live payload', () => {
+  const normalized = normalizePeopleSearchPayload({
+    fields: ['contact.id', 'contact.69d924677027d8000199391f', 'account.69d924687027d8000199392c'],
+    typed_custom_fields: ['69d924677027d8000199391f', '69d924687027d8000199392c'],
+  });
+
+  assert.deepEqual(normalized.typed_custom_fields, ['69d924677027d8000199391f', '69d924687027d8000199392c']);
+  assert.ok(Array.isArray(normalized.fields));
+  assert.ok((normalized.fields as string[]).includes('contact.69d924677027d8000199391f'));
+  assert.ok((normalized.fields as string[]).includes('account.69d924687027d8000199392c'));
+});
+
+test('buildReplayHeaders uses live auth and preserves current turnstile token when present', () => {
   const replayHeaders = buildReplayHeaders(
     {
       accept: '*/*',
       'x-csrf-token': 'stale-csrf',
-      'x-cf-turnstile-response': 'stale-turnstile',
+      'x-cf-turnstile-response': 'current-turnstile',
       baggage: 'trace',
     },
     {
@@ -98,5 +112,38 @@ test('buildReplayHeaders uses live auth and omits turnstile token', () => {
   assert.equal(replayHeaders.cookie, 'a=b; c=d');
   assert.equal(replayHeaders['x-csrf-token'], 'live-csrf');
   assert.equal(replayHeaders.baggage, 'trace');
-  assert.equal('x-cf-turnstile-response' in replayHeaders, false);
+  assert.equal(replayHeaders['x-cf-turnstile-response'], 'current-turnstile');
+});
+
+test('pickActiveApolloPage prefers the current open page handle', () => {
+  const preferred = {
+    isClosed: () => false,
+    url: () => 'https://app.apollo.io/#/people',
+  };
+  const other = {
+    isClosed: () => false,
+    url: () => 'https://example.com/',
+  };
+
+  assert.equal(pickActiveApolloPage(preferred as never, [other as never, preferred as never]), preferred);
+});
+
+test('pickActiveApolloPage recovers an open Apollo page when the preferred handle is closed', () => {
+  const closedPreferred = {
+    isClosed: () => true,
+    url: () => 'https://app.apollo.io/#/people',
+  };
+  const apolloReplacement = {
+    isClosed: () => false,
+    url: () => 'https://app.apollo.io/#/people?search%5Bperson_titles%5D%5B%5D=Engineer',
+  };
+  const unrelatedPage = {
+    isClosed: () => false,
+    url: () => 'https://login.microsoftonline.com/',
+  };
+
+  assert.equal(
+    pickActiveApolloPage(closedPreferred as never, [unrelatedPage as never, apolloReplacement as never]),
+    apolloReplacement,
+  );
 });

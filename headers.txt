@@ -1,0 +1,100 @@
+access-control-allow-methods
+GET, POST, PUT, PATCH, DELETE, OPTIONS
+access-control-allow-origin
+https://app.apollo.io
+access-control-expose-headers
+x-app-id
+access-control-max-age
+7200
+cache-control
+max-age=0, private, must-revalidate
+cf-cache-status
+DYNAMIC
+cf-ray
+9ee5e88e0ddf13b8-ARN
+content-encoding
+gzip
+content-security-policy
+frame-ancestors 'self' chrome-extension://alhgpfoeiimagjlnfekdhkjlkiomcapa chrome-extension://ececkagaccnfmkopaiemklekhoimmgpn *.salesforce.com *.lightning.force.com; report-uri https://o101058.ingest.us.sentry.io/api/222018/security/?sentry_key=86bb17dd8c2449719dd6b498f3431191&sentry_environment=production&sentry_release=30225785eeb83caa4b01054dbda13d19e5c70fc6
+content-type
+application/json; charset=utf-8
+date
+Sat, 18 Apr 2026 18:59:45 GMT
+etag
+W/"4ce726f52a1213fd9ab7fc9e316ca5e8"
+server
+cloudflare
+set-cookie
+X-CSRF-TOKEN=ZnefrwTVe38HqJUe2ep6DQPsGup-ED8vYtNfxzyQsmnHSTRYEv2hFySFl9IVVupQsznr3sX1fhxAn0dJU93d4Q; path=/; secure; SameSite=Lax
+set-cookie
+_leadgenie_session=XGS9MHy1mtH69rCYtkLSqff7S%2FdDAwpe4SXyPjJGFnLsugA1gKYMG84RioNCxm9orxHKbPg%2Bmhp8lLgyqeghpcbN1aEn%2FBU9pVhkfmtdCpYgecgjt%2BKxa4261yPkJnRSrIv9iMPKDttq34gG9VvKLBupKYEsm6eO5XRg%2BRZuGYdMo9CbIakyaUHt79rDtCu%2BDNQ9aK2Dvp7vg7uSVk%2FRXhXzI%2BIMskm3vhgtDGLbLgusY2shjS%2B9QqqmdAa5vtoiFkVAfD%2FAcCMffZFlXVfM%2FSn1Df508lD3szg%3D--6GLuEfCnWmxndKPS--immntD4NctVJDDQb%2BeHgGw%3D%3D; path=/; secure; HttpOnly; SameSite=None
+strict-transport-security
+max-age=31536000
+vary
+Origin
+x-app-ui-version
+114
+x-content-type-options
+nosniff
+x-frame-options
+ALLOWALL
+x-request-id
+d1bbbfc3-a253-4941-9d5d-7d801121126a
+x-runtime
+0.078866
+x-transaction-id
+f3334f72-49a6-4327-966c-0f2bc099f967
+:authority
+app.apollo.io
+:method
+POST
+:path
+/api/v1/mixed_people/search_metadata_mode
+:scheme
+https
+accept
+*/*
+accept-encoding
+gzip, deflate, br, zstd
+accept-language
+en-US,en;q=0.9
+baggage
+sentry-environment=production,sentry-release=leadgenie-app-production%4030225785eeb83caa4b01054dbda13d19e5c70fc6,sentry-public_key=86bb17dd8c2449719dd6b498f3431191,sentry-trace_id=fd9bfd74b5704be98cf38673f8354ec5,sentry-transaction=%2F,sentry-sampled=false,sentry-sample_rand=0.6830212246421562,sentry-sample_rate=0
+content-length
+624
+content-type
+application/json
+cookie
+dwndvc=b8f03716d30e25646a3e2696c9f1d39ad9b6270c6f273e4105688aca8a0d50b8; zp__initial_referrer=https://www.apollo.io/privacy-policy/remove; zp__initial_landing_page=https://www.apollo.io/; intercom-device-id-dyws6i9m=6f0ff8c9-0ddf-468f-bcfa-4c94ad340ce9; dwnjrn=e3e86f11cf2a970d30a1aac5be63d02922dac9a2cb1c493a3521a4d5e2d3b8ef; zp__utm_medium=(none); zp__initial_utm_medium=(none); zp__initial_utm_source=(direct); pscd=get.apollo.io; ZP_Pricing_Split_Test_Variant=25Q4_UC_AC59; zp_device_id=eyJfcmFpbHMiOnsibWVzc2FnZSI6IklrMVVZek5PYWsweVRWUkZlazVZZUVWbFZGcDBWRlJyTkZsWWVFUmhTRXAyWWxkV09GWXliSFZhUnprell6TjNlRTFJZURCTlZFNXJUVlJWZUU0eVozbFllbWhyV1ZkR2JVNXFSVEZOYW1NelRWWTVhVTV0V1RCTlJGWm9UVVJCTWsxcVVUMGkiLCJleHAiOiIyMDI2LTEwLTEzVDE3OjM4OjU1LjQ5MVoiLCJwdXIiOiJjb29raWUuenBfZGV2aWNlX2lkIn19--368ad229bccb1eed7603744587e0fafe317b1c74; zp__utm_source=login.live.com; ZP_LATEST_LOGIN_PRICING_VARIANT=25Q4_UC_AC59; AMP_MKTG_122a93c7d9=JTdCJTIycmVmZXJyZXIlMjIlM0ElMjJodHRwcyUzQSUyRiUyRmxvZ2luLm1pY3Jvc29mdG9ubGluZS5jb20lMkYlMjIlMkMlMjJyZWZlcnJpbmdfZG9tYWluJTIyJTNBJTIybG9naW4ubWljcm9zb2Z0b25saW5lLmNvbSUyMiU3RA==; __cf_bm=P.o080_N_o_Npv2__m9TBoJVAr8X2PmUUPNP8kTcsgs-1776538764.1647115-1.0.1.1-aFBR10gbhc2Yen5U.Zf_C8KVvbPxN3cJGVSQyoaWjyCE1iMrKx7K1OtXXZunA7egv7Ter8_InMoTwMpAZIpab2fGI_yKB3DUGlmpyUxd8YGALWcqJdbC6bcxk7CjpMk7; remember_token_leadgenie_v2=eyJfcmFpbHMiOnsibWVzc2FnZSI6IklqWTVaRGt5TkRZM01tTmxZVFJtTURBeE5XVTFZekF3Tmw4MlpUYzJNbVkxTVRNNU16TmlOemhsWXpReFpqVXlaVE13WW1NMllURmxOU0k9IiwiZXhwIjoiMjAyNi0wNS0xOFQxODo1OTozOC4wMjRaIiwicHVyIjoiY29va2llLnJlbWVtYmVyX3Rva2VuX2xlYWRnZW5pZV92MiJ9fQ%3D%3D--39d917ca800c0e7af920b263e9ef87328b3a87a6; app_token=f87436334c35154ad795911548d6b5fe; AMP_122a93c7d9=JTdCJTIyZGV2aWNlSWQlMjIlM0ElMjJkZDAyZjZhYS1jZDFjLTQ1ZjQtYTAwMC0xMmU0ODFkODYzNjIlMjIlMkMlMjJ1c2VySWQlMjIlM0ElMjI2OWQ5MjQ2NzJjZWE0ZjAwMTVlNWMwMDYlMjIlMkMlMjJzZXNzaW9uSWQlMjIlM0ExNzc2NTEyOTM5NzMxJTJDJTIyb3B0T3V0JTIyJTNBZmFsc2UlMkMlMjJsYXN0RXZlbnRUaW1lJTIyJTNBMTc3NjUxMjkzOTc0MyUyQyUyMmxhc3RFdmVudElkJTIyJTNBNzUwJTJDJTIycGFnZUNvdW50ZXIlMjIlM0EwJTdE; X-CSRF-TOKEN=-91TGIuR3v5aaluyZ4kmmF4n5NcW9C-YafyQCxOFlexa4_jvnbkElnlHWX6rNbbF7vIV460RbqtLsIiFfMj6ZA; _leadgenie_session=CoSTg7r5bpD6SWzyaUk2v0fW3fLM1FmV0FlcmZxtwy%2FNf4Ipx%2Bm8SXoh3TaMwaLR4TZa32509NMMfVyRGy95UIg2gKzrHi2xrJXNBho9w5%2FmEJPGwdJa0k3ncQZi1GzE83z6dr5nwM3FgVftwjncNoIJ4eWPr285KubgE%2Byf2gMRyuBgMKG09SI9fGMSUmO71qcRzWHL5FVYztSXVMh9OHKCP4Q7iz8D2sWL4z49%2BHt5X6G9AeQu%2FfkLLhV%2FBLTNXYsWkjY7KCs0HNSn9r4V7%2Bw42iKjp2QnJaQ%3D--Venp3gzRS%2BitPRXY--1Zxwg%2B0Cz2PV6XEnDvYNqg%3D%3D
+origin
+https://app.apollo.io
+priority
+u=1, i
+referer
+https://app.apollo.io/
+sec-ch-ua
+"Brave";v="147", "Not.A/Brand";v="8", "Chromium";v="147"
+sec-ch-ua-mobile
+?0
+sec-ch-ua-platform
+"Windows"
+sec-fetch-dest
+empty
+sec-fetch-mode
+cors
+sec-fetch-site
+same-origin
+sec-gpc
+1
+sentry-trace
+fd9bfd74b5704be98cf38673f8354ec5-ab5385d6d66b2f6e-0
+user-agent
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36
+x-accept-language
+en
+x-csrf-token
+-91TGIuR3v5aaluyZ4kmmF4n5NcW9C-YafyQCxOFlexa4_jvnbkElnlHWX6rNbbF7vIV460RbqtLsIiFfMj6ZA
+x-referer-host
+app.apollo.io
+x-referer-path
+/people

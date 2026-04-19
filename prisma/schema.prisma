@@ -13,7 +13,7 @@ datasource db {
 model Lead {
   id          String   @id @default(uuid())
   jobId       String
-  linkedInUrl String   @unique
+  linkedInUrl String
   firstName   String
   lastName    String
   title       String?
@@ -29,4 +29,5 @@ model Lead {
   @@index([company])
   @@index([createdAt])
   @@index([jobId])
+  @@unique([jobId, linkedInUrl])
 }

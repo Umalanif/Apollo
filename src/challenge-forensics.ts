@@ -1,16 +1,13 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Page } from 'playwright';
-import { getPageDiagnosticsSnapshot } from './browser-diagnostics';
 import type { ChallengeDetection } from './challenge-detector';
 import type { ApolloBrowserConfig } from './browser-config';
 import {
   type AutomationSignals,
   type ManualChallengeState,
-  type TurnstileWidgetState,
   readAutomationSignalsScript,
   readManualChallengeStateScript,
-  readTurnstileWidgetStateScript,
 } from './browser-context';
 import { logger } from './logger';
 import { safePageEvaluate, safePageScreenshot, safePageUrl } from './playwright-helpers';
@@ -123,20 +120,6 @@ function isCloudflareChallengeUrl(value: string | null | undefined): boolean {
 }
 
 export function resolveTurnstilePageUrl(input: TurnstilePageUrlResolutionInput): TurnstilePageUrlResolution {
-  if (isCloudflareChallengeUrl(input.challengeFrameUrl)) {
-    return {
-      pageUrl: input.challengeFrameUrl!,
-      source: 'challenge_frame_url',
-    };
-  }
-
-  if (isCloudflareChallengeUrl(input.challengeIframeSrc)) {
-    return {
-      pageUrl: input.challengeIframeSrc!,
-      source: 'challenge_iframe_src',
-    };
-  }
-
   if (input.topLevelPageUrl) {
     return {
       pageUrl: input.topLevelPageUrl,
@@ -167,9 +150,8 @@ async function captureChallengeScreenshot(page: Page, jobId: string, phase: Chal
 }
 
 async function collectPageChallengeSnapshot(page: Page): Promise<PageChallengeSnapshot> {
-  const [manualState, widgetState, automationSignals] = await Promise.all([
+  const [manualState, automationSignals] = await Promise.all([
     safePageEvaluate<ManualChallengeState>(page, readManualChallengeStateScript),
-    safePageEvaluate<TurnstileWidgetState>(page, readTurnstileWidgetStateScript),
     safePageEvaluate<AutomationSignals>(page, readAutomationSignalsScript),
   ]);
 
@@ -177,12 +159,6 @@ async function collectPageChallengeSnapshot(page: Page): Promise<PageChallengeSn
     hasTurnstile: false,
     hasCloudflare: false,
     currentUrl: safePageUrl(page) ?? '',
-  };
-  const safeWidgetState = widgetState ?? {
-    sitekey: null,
-    action: null,
-    cData: null,
-    chlPageData: null,
   };
   const safeAutomationSignals = automationSignals ?? {
     navigatorWebdriver: null,
@@ -226,14 +202,12 @@ async function collectPageChallengeSnapshot(page: Page): Promise<PageChallengeSn
   const apolloCookies = cookies.filter(cookie => cookie.domain === 'apollo.io' || cookie.domain.endsWith('.apollo.io'));
   const apolloCookieNames = [...new Set(apolloCookies.map(cookie => cookie.name))].sort();
   const cloudflareCookieNames = apolloCookieNames.filter(name => name.startsWith('__cf'));
-  const diagnostics = getPageDiagnosticsSnapshot(page);
-
   return {
     currentPageUrl,
     challengeFrameUrl,
     challengeIframeSrc,
     hasVerificationFailedText,
-    widgetPresent: Boolean(safeWidgetState.sitekey || safeManualState.hasTurnstile || challengeIframeSrc),
+    widgetPresent: Boolean(safeManualState.hasTurnstile || challengeIframeSrc),
     hasTurnstile: safeManualState.hasTurnstile,
     hasCloudflare: safeManualState.hasCloudflare,
     apolloCookieCount: apolloCookies.length,
@@ -241,10 +215,10 @@ async function collectPageChallengeSnapshot(page: Page): Promise<PageChallengeSn
     cloudflareCookieNames,
     hasCfBm: apolloCookieNames.includes('__cf_bm'),
     hasCfClearance: apolloCookieNames.includes('cf_clearance'),
-    sitekey: safeWidgetState.sitekey,
-    action: safeWidgetState.action,
-    data: safeWidgetState.cData,
-    pagedata: safeWidgetState.chlPageData,
+    sitekey: null,
+    action: null,
+    data: null,
+    pagedata: null,
     navigatorWebdriver: safeAutomationSignals.navigatorWebdriver,
     automationGlobals: safeAutomationSignals.automationGlobals,
     controlledByAutomationBanner: safeAutomationSignals.controlledByAutomationBanner,
@@ -252,8 +226,8 @@ async function collectPageChallengeSnapshot(page: Page): Promise<PageChallengeSn
     language: safeAutomationSignals.language,
     languages: safeAutomationSignals.languages,
     timezone: safeAutomationSignals.timezone,
-    turnstileRenderErrorCode: diagnostics.turnstileRenderErrorCode,
-    patChallengeFailed: diagnostics.patChallengeFailed,
+    turnstileRenderErrorCode: null,
+    patChallengeFailed: false,
   };
 }
 

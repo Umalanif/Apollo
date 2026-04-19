@@ -24,6 +24,10 @@ interface CookieSeedDecision {
   reason?: string;
 }
 
+export interface CookieSeedBootstrapOptions {
+  includeCloudflareCookies?: boolean;
+}
+
 const APOLLO_COOKIE_NAMES = new Set([
   'app_token',
   '_leadgenie_session',
@@ -109,9 +113,14 @@ async function loadSeedCookies(seedPath: string): Promise<CookieSeedRecord[]> {
   return parsed as CookieSeedRecord[];
 }
 
-export async function bootstrapContextFromCookieSeed(context: BrowserContext, jobId: string): Promise<void> {
+export async function bootstrapContextFromCookieSeed(
+  context: BrowserContext,
+  jobId: string,
+  options: CookieSeedBootstrapOptions = {},
+): Promise<void> {
   const env = getEnv();
   const seedPath = env.APOLLO_COOKIE_SEED_PATH?.trim();
+  const includeCloudflareCookies = options.includeCloudflareCookies ?? (env.APOLLO_COOKIE_SEED_INCLUDE_CF === true);
 
   if (!seedPath) {
     return;
@@ -124,7 +133,7 @@ export async function bootstrapContextFromCookieSeed(context: BrowserContext, jo
     const rejected: Array<{ name: string; domain: string; reason: string }> = [];
 
     for (const entry of sourceCookies) {
-      const decision = filterSeedCookie(entry, env.APOLLO_COOKIE_SEED_INCLUDE_CF === true);
+      const decision = filterSeedCookie(entry, includeCloudflareCookies);
       if (decision.accepted && decision.cookie) {
         accepted.push(decision.cookie);
         continue;
@@ -147,7 +156,7 @@ export async function bootstrapContextFromCookieSeed(context: BrowserContext, jo
         seedPath: resolvedPath,
         acceptedCookieNames: accepted.map(cookie => cookie.name),
         rejectedCookies: rejected,
-        includeCloudflareCookies: env.APOLLO_COOKIE_SEED_INCLUDE_CF === true,
+        includeCloudflareCookies,
       },
       'Cookie seed bootstrap completed',
     );

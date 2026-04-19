@@ -1,15 +1,3 @@
-export interface ChallengeChecksResult {
-  results: string[];
-  sitekey: string | null;
-}
-
-export interface TurnstileWidgetState {
-  sitekey: string | null;
-  action: string | null;
-  cData: string | null;
-  chlPageData: string | null;
-}
-
 export interface ManualChallengeState {
   hasTurnstile: boolean;
   hasCloudflare: boolean;
@@ -24,6 +12,73 @@ export interface AutomationSignals {
   language: string | null;
   languages: string[];
   timezone: string | null;
+}
+
+export interface SyntheticSpeechVoice {
+  default: boolean;
+  lang: string;
+  localService: boolean;
+  name: string;
+  voiceURI: string;
+}
+
+export interface AutomationMaskConfig {
+  locale: string;
+  languages: string[];
+  speechVoices: SyntheticSpeechVoice[];
+}
+
+function normalizeLocale(locale: string | undefined): string {
+  const trimmed = (locale ?? '').trim();
+  return trimmed || 'en-US';
+}
+
+export function buildLocaleLanguages(locale: string | undefined): string[] {
+  const normalizedLocale = normalizeLocale(locale);
+  const primaryLanguage = normalizedLocale.split(/[-_]/)[0]?.toLowerCase() || 'en';
+  const variants = [
+    normalizedLocale,
+    primaryLanguage,
+    ...(primaryLanguage === 'en' ? [] : ['en-US', 'en']),
+  ];
+
+  return [...new Set(variants.filter(Boolean))];
+}
+
+export function buildAcceptLanguageHeader(locale: string | undefined): string {
+  return buildLocaleLanguages(locale)
+    .map((language, index) => index === 0 ? language : `${language};q=${Math.max(0.1, 1 - (index * 0.1)).toFixed(1)}`)
+    .join(',');
+}
+
+export function buildSyntheticSpeechVoices(locale: string | undefined): SyntheticSpeechVoice[] {
+  const normalizedLocale = normalizeLocale(locale);
+  const primaryLanguage = normalizedLocale.split(/[-_]/)[0]?.toLowerCase() || 'en';
+
+  const localizedVoiceByLanguage: Record<string, { name: string; lang: string }> = {
+    de: { name: 'Microsoft Katja - German (Germany)', lang: 'de-DE' },
+    en: { name: 'Microsoft Aria - English (United States)', lang: 'en-US' },
+    fr: { name: 'Microsoft Denise - French (France)', lang: 'fr-FR' },
+    es: { name: 'Microsoft Elvira - Spanish (Spain)', lang: 'es-ES' },
+    it: { name: 'Microsoft Elsa - Italian (Italy)', lang: 'it-IT' },
+    nl: { name: 'Microsoft Colette - Dutch (Netherlands)', lang: 'nl-NL' },
+    pl: { name: 'Microsoft Paulina - Polish (Poland)', lang: 'pl-PL' },
+    pt: { name: 'Microsoft Maria - Portuguese (Brazil)', lang: 'pt-BR' },
+  };
+
+  const localizedVoice = localizedVoiceByLanguage[primaryLanguage] ?? localizedVoiceByLanguage.en;
+  const fallbackVoices = [
+    localizedVoice,
+    { name: 'Microsoft Aria - English (United States)', lang: 'en-US' },
+  ];
+
+  return fallbackVoices.map((voice, index) => ({
+    default: index === 0,
+    lang: voice.lang,
+    localService: true,
+    name: voice.name,
+    voiceURI: voice.name,
+  }));
 }
 
 export interface ApolloSessionForensics {
@@ -45,229 +100,51 @@ export interface ApolloSessionForensics {
 const buildFunction = <T extends Function>(args: string[], body: string): T =>
   new Function(...args, body) as unknown as T;
 
-export const installTurnstileObserverScript = buildFunction<() => void>([], `
-  if (window.__apolloTurnstileObserverInstalled) {
-    return;
-  }
-
-  window.__apolloTurnstileObserverInstalled = true;
-  window.__apolloTurnstileState = window.__apolloTurnstileState || { widgets: [] };
-
-  function inferSitekey(container, params) {
-    if (params && params.sitekey) {
-      return params.sitekey;
-    }
-
-    if (!container) {
-      return null;
-    }
-
-    if (typeof container === 'string') {
-      var selected = document.querySelector(container);
-      return selected ? selected.getAttribute('data-sitekey') : null;
-    }
-
-    if (container.getAttribute) {
-      return container.getAttribute('data-sitekey');
-    }
-
-    return null;
-  }
-
-  function persistWidget(container, params, widgetId) {
-    var widgets = window.__apolloTurnstileState.widgets;
-    var nextWidget = {
-      widgetId: widgetId == null ? null : String(widgetId),
-      sitekey: inferSitekey(container, params || {}),
-      action: params && params.action ? String(params.action) : null,
-      cData: params && (params.cData || params.data) ? String(params.cData || params.data) : null,
-      chlPageData: params && (params.chlPageData || params.pageData || params.pagedata)
-        ? String(params.chlPageData || params.pageData || params.pagedata)
-        : null,
-      callback: params && typeof params.callback === 'function' ? params.callback : null,
-    };
-
-    var replaced = false;
-    for (var i = 0; i < widgets.length; i += 1) {
-      if (widgets[i].widgetId && nextWidget.widgetId && widgets[i].widgetId === nextWidget.widgetId) {
-        widgets[i] = nextWidget;
-        replaced = true;
-        break;
-      }
-    }
-
-    if (!replaced) {
-      widgets.push(nextWidget);
-    }
-
-    window.__apolloTurnstileState.lastWidget = nextWidget;
-  }
-
-  function patchTurnstile(turnstile) {
-    if (!turnstile || turnstile.__apolloObserverPatched || typeof turnstile.render !== 'function') {
-      return;
-    }
-
-    var originalRender = turnstile.render;
-    turnstile.render = function(container, params) {
-      var widgetId = originalRender.apply(this, arguments);
-      try {
-        persistWidget(container, params || {}, widgetId);
-      } catch (_err) {
-        // Ignore observer failures and let the widget continue rendering.
-      }
-      return widgetId;
-    };
-
-    turnstile.__apolloObserverPatched = true;
-  }
-
-  var startedAt = Date.now();
-  var intervalId = window.setInterval(function() {
-    if (window.turnstile) {
-      patchTurnstile(window.turnstile);
-    }
-
-    if (Date.now() - startedAt > 30000) {
-      window.clearInterval(intervalId);
-    }
-  }, 50);
-`);
-
-export const detectChallengeChecksScript = buildFunction<() => ChallengeChecksResult>([], `
-  var results = [];
-  var sitekey = null;
-
-  var doc = document;
-  var bodyText = (doc.body && doc.body.textContent ? doc.body.textContent : '').toLowerCase();
-  var title = (doc.title || '').toLowerCase();
-
-  var cfTurnstile = doc.querySelector('.cf-turnstile, [class*="turnstile"][data-sitekey], iframe[src*="challenges.cloudflare.com"]');
-  var turnstileScriptLoaded = Array.from(doc.scripts).some(function (script) {
-    return script.src.includes('turnstile/v0/api.js');
-  });
-  var turnstileText = bodyText.includes('turnstile') || bodyText.includes('verify you are a human');
-  if (cfTurnstile || (turnstileScriptLoaded && turnstileText)) {
-    sitekey =
-      (cfTurnstile && cfTurnstile.dataset ? cfTurnstile.dataset.sitekey : null) ||
-      (cfTurnstile ? cfTurnstile.getAttribute('data-sitekey') : null) ||
-      sitekey;
-    results.push('turnstile');
-  }
-
-  var cfSpinner = doc.querySelector('#cf-spinner, .cf-spinner, #spinner');
-  var cfBrowserVerif = doc.querySelector('#cf-browser-verification, .cf-browser-verification');
-  var cfPendingCheck = doc.querySelector('#pending-check, .pending-check, #captcha-interstitial');
-  var cfChallengeModal = doc.querySelector('#challeng-modal, #challenge-modal');
-  var cfError = bodyText.includes('cloudflare');
-  var uaChallenge = bodyText.includes('please check your browser');
-  var cfVerifyHuman = bodyText.includes('verify you are a human');
-  var cfAccessDenied = bodyText.includes('access denied');
-  var cfAccessDeniedTitle = title.includes('access denied');
-
-  if (cfSpinner || cfBrowserVerif || cfPendingCheck || cfChallengeModal || cfError || uaChallenge || cfVerifyHuman || cfAccessDenied) {
-    results.push('cloudflare');
-  }
-  if (title.includes('cloudflare') || cfAccessDeniedTitle) {
-    results.push('cloudflare');
-  }
-
-  var dataDomeCaptcha = doc.querySelector('[data-dome-captcha], .datadome-captcha, #datadome-captcha, .dd-captcha');
-  var dataDomeModal = doc.querySelector('[data-dome-modal], .datadome-modal, #datadome-modal, .datadome-challenge-modal');
-  var dataDomeCaptchaContainer = doc.querySelector('#captcha-container, .captcha-container, #hcaptcha-container');
-  var dataDomeText = bodyText.includes('datadome') || bodyText.includes('data domain');
-  if (dataDomeCaptcha || dataDomeModal || dataDomeCaptchaContainer || dataDomeText) {
-    results.push('datadome');
-  }
-
-  var recaptchaEl = doc.querySelector('.g-recaptcha, #g-recaptcha, .grecaptcha-badge');
-  var recaptchaBadge = doc.querySelector('.grecaptcha-badge, #grecaptcha-badge, .recaptcha-badge');
-  var recaptchaText = bodyText.includes('recaptcha') && bodyText.includes('challenge');
-  if (recaptchaEl) {
-    sitekey =
-      (recaptchaEl.dataset ? recaptchaEl.dataset.sitekey : null) ||
-      recaptchaEl.getAttribute('data-sitekey') ||
-      sitekey;
-  }
-  if (!sitekey) {
-    var sitekeyEl = doc.querySelector('[data-sitekey]');
-    sitekey = sitekeyEl ? sitekeyEl.getAttribute('data-sitekey') : null;
-  }
-  if (!sitekey && window.__apolloTurnstileState && window.__apolloTurnstileState.lastWidget) {
-    sitekey = window.__apolloTurnstileState.lastWidget.sitekey || null;
-  }
-  if (recaptchaEl || recaptchaBadge || recaptchaText) {
-    results.push('recaptcha');
-  }
-
-  var blockTextPatterns = [
-    'access denied',
-    'forbidden',
-    'ip blocked',
-    'blocked your ip',
-    'your ip has been blocked',
-    'rate limit',
-    'too many requests',
-    'please wait',
-    'unusual traffic',
-    'suspicious activity'
-  ];
-
-  for (var i = 0; i < blockTextPatterns.length; i += 1) {
-    if (bodyText.includes(blockTextPatterns[i])) {
-      results.push('generic_block');
-      break;
-    }
-  }
-
-  if (title.includes('access denied') || title.includes('forbidden') || title.includes('blocked')) {
-    results.push('generic_block');
-  }
-
-  return { results: results, sitekey: sitekey };
-`);
-
 export const readManualChallengeStateScript = buildFunction<() => ManualChallengeState>([], `
   var doc = document;
-  var bodyText = (doc.body && doc.body.textContent ? doc.body.textContent : '').toLowerCase();
-  var title = (doc.title || '').toLowerCase();
-
-  var hasTurnstile = Boolean(
-    doc.querySelector('.cf-turnstile, [class*="turnstile"][data-sitekey], iframe[src*="challenges.cloudflare.com"]')
-  ) || (
-    Array.from(doc.scripts).some(function (script) {
-      return script.src.includes('turnstile/v0/api.js');
-    }) && (bodyText.includes('turnstile') || bodyText.includes('verify you are a human'))
+  var currentUrl = window.location.href;
+  var bodyText = (doc.body && doc.body.innerText ? doc.body.innerText : '').toLowerCase();
+  var hasChallengeIframe = Boolean(
+    doc.querySelector([
+      'iframe[src*="challenges.cloudflare.com"]',
+      'iframe[src*="/cdn-cgi/challenge-platform/"]',
+      'iframe[src*="turnstile"]',
+      'iframe[title*="Cloudflare"]',
+      'iframe[title*="Turnstile"]',
+      'iframe[name*="cf-chl-widget"]'
+    ].join(', '))
+  );
+  var hasTurnstileWidget = Boolean(
+    doc.querySelector([
+      '.cf-turnstile',
+      '[data-sitekey][class*="turnstile"]',
+      '[id*="cf-chl-widget"]',
+      '[class*="cf-challenge"]',
+      '[class*="cf-turnstile"]'
+    ].join(', '))
+  );
+  var hasChallengeUrl = currentUrl.includes('challenges.cloudflare.com') || currentUrl.includes('/cdn-cgi/challenge-platform/');
+  var hasChallengeText = (
+    bodyText.includes('cloudflare')
+    || bodyText.includes('turnstile')
+    || bodyText.includes('verify you are human')
+    || bodyText.includes('verify that you are human')
+    || bodyText.includes('checking your browser')
+    || bodyText.includes('checking if the site connection is secure')
+    || bodyText.includes('review the security of your connection')
+    || bodyText.includes('troubleshooting')
+    || bodyText.includes('problembehebung')
+    || bodyText.includes('verification failed')
+    || bodyText.includes('uberprufung fehlgeschlagen')
   );
 
-  var hasCloudflare = [
-    bodyText.includes('cloudflare'),
-    bodyText.includes('verify you are a human'),
-    bodyText.includes('checking your browser'),
-    bodyText.includes('access denied'),
-    title.includes('cloudflare'),
-    title.includes('access denied'),
-    Boolean(doc.querySelector('#cf-spinner, .cf-spinner, #cf-browser-verification, .cf-browser-verification'))
-  ].some(Boolean);
+  var hasTurnstile = hasTurnstileWidget || hasChallengeIframe;
+  var hasCloudflare = hasChallengeUrl || hasChallengeIframe || hasTurnstileWidget || hasChallengeText;
 
   return {
     hasTurnstile: hasTurnstile,
     hasCloudflare: hasCloudflare,
-    currentUrl: window.location.href
-  };
-`);
-
-export const readTurnstileWidgetStateScript = buildFunction<() => TurnstileWidgetState>([], `
-  var fallbackSitekeyEl = document.querySelector('[data-sitekey]');
-  var state = window.__apolloTurnstileState || {};
-  var widgets = Array.isArray(state.widgets) ? state.widgets : [];
-  var widget = widgets.length ? widgets[widgets.length - 1] : (state.lastWidget || null);
-
-  return {
-    sitekey: widget && widget.sitekey ? widget.sitekey : (fallbackSitekeyEl ? fallbackSitekeyEl.getAttribute('data-sitekey') : null),
-    action: widget && widget.action ? widget.action : null,
-    cData: widget && widget.cData ? widget.cData : null,
-    chlPageData: widget && widget.chlPageData ? widget.chlPageData : null,
+    currentUrl: currentUrl
   };
 `);
 
@@ -307,24 +184,238 @@ export const readAutomationSignalsScript = buildFunction<() => AutomationSignals
   };
 `);
 
-export const installAutomationMaskScript = buildFunction<() => void>([], `
+export const installAutomationMaskScript = buildFunction<(config: AutomationMaskConfig) => void>(['config'], `
+  var effectiveConfig = config || {};
+  var languages = Array.isArray(effectiveConfig.languages) && effectiveConfig.languages.length
+    ? effectiveConfig.languages.slice()
+    : ['en-US', 'en'];
+  var locale = languages[0] || effectiveConfig.locale || 'en-US';
+  var speechVoices = Array.isArray(effectiveConfig.speechVoices) ? effectiveConfig.speechVoices.slice() : [];
+
+  var defineGetter = function(target, property, getter) {
+    if (!target) {
+      return;
+    }
+
+    try {
+      Object.defineProperty(target, property, {
+        configurable: true,
+        get: getter
+      });
+    } catch (_err) {}
+  };
+
   var patchNavigatorProto = function() {
     var proto = Object.getPrototypeOf(navigator);
     if (!proto) {
       return;
     }
 
-    try {
-      Object.defineProperty(proto, 'webdriver', {
-        configurable: true,
-        get: function() {
-          return undefined;
+    defineGetter(proto, 'webdriver', function() {
+      return false;
+    });
+    defineGetter(proto, 'language', function() {
+      return locale;
+    });
+    defineGetter(proto, 'languages', function() {
+      return languages.slice();
+    });
+  };
+
+  var removeAutomationGlobals = function() {
+    var candidates = [
+      '__playwright__binding__',
+      '__pwInitScripts',
+      '__nightmare',
+      '__selenium_unwrapped',
+      '__webdriver_evaluate',
+      '__driver_evaluate',
+      '__webdriver_script_fn',
+      '__webdriver_script_func',
+      '__lastWatirAlert',
+      '__lastWatirConfirm',
+      '__lastWatirPrompt',
+      '_WEBDRIVER_ELEM_CACHE'
+    ];
+
+    for (var i = 0; i < candidates.length; i += 1) {
+      var key = candidates[i];
+      try {
+        delete window[key];
+      } catch (_deleteErr) {}
+
+      try {
+        Object.defineProperty(window, key, {
+          configurable: true,
+          get: function() {
+            return undefined;
+          }
+        });
+      } catch (_defineErr) {}
+    }
+  };
+
+  var buildUserAgentData = function() {
+    var ua = navigator.userAgent || '';
+    var edgeMatch = ua.match(/Edg\\/([\\d.]+)/);
+    var chromeMatch = ua.match(/Chrome\\/([\\d.]+)/);
+    var browserVersion = (edgeMatch && edgeMatch[1]) || (chromeMatch && chromeMatch[1]) || '123.0.0.0';
+    var majorVersion = browserVersion.split('.')[0] || '123';
+    var brands = edgeMatch
+      ? [
+        { brand: 'Microsoft Edge', version: majorVersion },
+        { brand: 'Chromium', version: majorVersion },
+        { brand: 'Not=A?Brand', version: '24' }
+      ]
+      : [
+        { brand: 'Chromium', version: majorVersion },
+        { brand: 'Google Chrome', version: majorVersion },
+        { brand: 'Not=A?Brand', version: '24' }
+      ];
+    var platform = /Windows/i.test(ua)
+      ? 'Windows'
+      : (/Macintosh/i.test(ua) ? 'macOS' : (/Linux/i.test(ua) ? 'Linux' : 'Unknown'));
+    return {
+      brands: brands,
+      mobile: false,
+      platform: platform,
+      getHighEntropyValues: function(hints) {
+        var values = {
+          architecture: 'x86',
+          bitness: '64',
+          brands: brands,
+          fullVersionList: brands.map(function(entry) {
+            return { brand: entry.brand, version: browserVersion };
+          }),
+          mobile: false,
+          model: '',
+          platform: platform,
+          platformVersion: '15.0.0',
+          uaFullVersion: browserVersion,
+          wow64: false
+        };
+        if (!Array.isArray(hints)) {
+          return Promise.resolve(values);
         }
-      });
+
+        var filtered = {};
+        for (var i = 0; i < hints.length; i += 1) {
+          var hint = hints[i];
+          if (Object.prototype.hasOwnProperty.call(values, hint)) {
+            filtered[hint] = values[hint];
+          }
+        }
+        if (!Object.prototype.hasOwnProperty.call(filtered, 'brands')) {
+          filtered.brands = brands;
+        }
+        if (!Object.prototype.hasOwnProperty.call(filtered, 'mobile')) {
+          filtered.mobile = false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(filtered, 'platform')) {
+          filtered.platform = platform;
+        }
+        return Promise.resolve(filtered);
+      },
+      toJSON: function() {
+        return {
+          brands: brands,
+          mobile: false,
+          platform: platform
+        };
+      }
+    };
+  };
+
+  var createNamedArray = function(entries, nameKey) {
+    var list = entries.slice();
+    list.item = function(index) {
+      return list[index] || null;
+    };
+    list.namedItem = function(name) {
+      for (var i = 0; i < list.length; i += 1) {
+        if (list[i] && list[i][nameKey] === name) {
+          return list[i];
+        }
+      }
+      return null;
+    };
+    list.refresh = function() {};
+    return list;
+  };
+
+  var patchPlugins = function() {
+    var plugins = navigator.plugins;
+    if (plugins && typeof plugins.length === 'number' && plugins.length > 0) {
+      return;
+    }
+
+    var mimeTypes = createNamedArray([
+      { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+      { type: 'text/pdf', suffixes: 'pdf', description: 'Portable Document Format' }
+    ], 'type');
+    var fakePlugins = createNamedArray([
+      {
+        name: 'PDF Viewer',
+        filename: 'internal-pdf-viewer',
+        description: 'Portable Document Format',
+        0: mimeTypes[0],
+        1: mimeTypes[1],
+        length: 2
+      },
+      {
+        name: 'Chromium PDF Viewer',
+        filename: 'internal-pdf-viewer',
+        description: 'Portable Document Format',
+        0: mimeTypes[0],
+        1: mimeTypes[1],
+        length: 2
+      }
+    ], 'name');
+
+    defineGetter(Object.getPrototypeOf(navigator), 'plugins', function() {
+      return fakePlugins;
+    });
+    defineGetter(Object.getPrototypeOf(navigator), 'mimeTypes', function() {
+      return mimeTypes;
+    });
+  };
+
+  var patchSpeechSynthesis = function() {
+    if (!window.speechSynthesis || !speechVoices.length) {
+      return;
+    }
+
+    var voices = speechVoices.map(function(voice) {
+      return {
+        default: Boolean(voice.default),
+        lang: voice.lang,
+        localService: Boolean(voice.localService),
+        name: voice.name,
+        voiceURI: voice.voiceURI
+      };
+    });
+
+    try {
+      window.speechSynthesis.getVoices = function() {
+        return voices.slice();
+      };
     } catch (_err) {}
+
+    try {
+      setTimeout(function() {
+        window.dispatchEvent(new Event('voiceschanged'));
+      }, 0);
+    } catch (_dispatchErr) {}
   };
 
   patchNavigatorProto();
+  removeAutomationGlobals();
+  patchPlugins();
+  patchSpeechSynthesis();
+
+  defineGetter(Object.getPrototypeOf(navigator), 'userAgentData', function() {
+    return buildUserAgentData();
+  });
 
   try {
     Object.defineProperty(window, 'chrome', {
@@ -353,52 +444,6 @@ export const installAutomationMaskScript = buildFunction<() => void>([], `
       }
     });
   } catch (_err) {}
-`);
-
-export const injectChallengeTokenScript = buildFunction<(challengeToken: string) => void>(['challengeToken'], `
-  var selectors = [
-    'textarea[name="g-recaptcha-response"]',
-    '#g-recaptcha-response',
-    'textarea[name="cf-turnstile-response"]',
-    'input[name="cf-turnstile-response"]',
-    'input[name="cf_challenge_response"]'
-  ];
-
-  for (var i = 0; i < selectors.length; i += 1) {
-    var elements = document.querySelectorAll(selectors[i]);
-    for (var j = 0; j < elements.length; j += 1) {
-      var element = elements[j];
-      element.value = challengeToken;
-      element.dispatchEvent(new Event('input', { bubbles: true }));
-      element.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-  }
-
-  var container = document.querySelector('form') || document.body;
-  if (container && !document.querySelector('[name="cf-turnstile-response"]')) {
-    var hiddenInput = document.createElement('input');
-    hiddenInput.type = 'hidden';
-    hiddenInput.name = 'cf-turnstile-response';
-    hiddenInput.value = challengeToken;
-    container.appendChild(hiddenInput);
-  }
-
-  var state = window.__apolloTurnstileState || {};
-  var widgets = Array.isArray(state.widgets) ? state.widgets : [];
-  for (var k = widgets.length - 1; k >= 0; k -= 1) {
-    var widget = widgets[k];
-    if (widget && typeof widget.callback === 'function') {
-      widget.callback(challengeToken);
-      break;
-    }
-  }
-
-  document.dispatchEvent(new CustomEvent('recaptcha-token-ready', {
-    detail: { token: challengeToken }
-  }));
-  document.dispatchEvent(new CustomEvent('turnstile-token-ready', {
-    detail: { token: challengeToken }
-  }));
 `);
 
 export const mutateHashScript = buildFunction<(hash: string) => void>(['hash'], `

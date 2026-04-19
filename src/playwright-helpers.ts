@@ -1,4 +1,4 @@
-import type { Page } from 'playwright';
+import type { Cookie, Page } from 'playwright';
 
 function normalizeErrorMessage(err: unknown): string {
   if (err instanceof Error) {
@@ -12,8 +12,13 @@ export function isTargetClosedError(err: unknown): boolean {
   const message = normalizeErrorMessage(err).toLowerCase();
   return (
     message.includes('target closed')
+    || message.includes('target crashed')
     || message.includes('page closed')
+    || message.includes('page was closed')
+    || message.includes('page crashed')
     || message.includes('context closed')
+    || message.includes('context was closed')
+    || message.includes('browser page was closed')
     || message.includes('browser has been closed')
   );
 }
@@ -84,6 +89,25 @@ export function safePageUrl(page: Page): string | null {
   } catch (err) {
     if (isTargetClosedError(err)) {
       return null;
+    }
+
+    throw err;
+  }
+}
+
+export async function safePageCookies(
+  page: Page,
+  url?: string | string[],
+): Promise<Cookie[]> {
+  if (page.isClosed()) {
+    return [];
+  }
+
+  try {
+    return await page.context().cookies(url as never);
+  } catch (err) {
+    if (isTargetClosedError(err)) {
+      return [];
     }
 
     throw err;

@@ -7,15 +7,22 @@ import { launchApolloContext } from './browser-launch';
 import { attachPageDiagnostics } from './browser-diagnostics';
 import { mutateHashScript } from './browser-context';
 import { detectChallenge, type ChallengeDetection } from './challenge-detector';
-import { ApolloResponseError, type ApolloResponseMeta, SessionTrustError } from './errors';
+import {
+  ApolloResponseError,
+  type ApolloRequestCapture,
+  type ApolloResponseMeta,
+  EnvironmentTrustError,
+  SessionTrustError,
+} from './errors';
 import { logger } from './logger';
-import { safePageEvaluate, safePageScreenshot, safePageUrl } from './playwright-helpers';
+import { isTargetClosedError, safePageEvaluate, safePageScreenshot, safePageUrl } from './playwright-helpers';
 import { runApolloSessionPreflight, warmupApolloSession } from './session-preflight';
 import { AuthManager } from './services/auth.service';
 
 export interface CrawlerDeps {
   jobId: string;
   launchAttempt?: number;
+  forceFreshProfile?: boolean;
   onChallengeDetected?: (detection: ChallengeDetection, url: string, page: Page) => void | Promise<void>;
   onPeopleResponse?: (payload: unknown, responseMeta: ApolloResponseMeta, page: Page, url: string) => void | Promise<void>;
 }
@@ -24,15 +31,6 @@ export interface ManagedCrawler {
   run: (requests: Array<{ url: string; uniqueKey?: string; userData?: { targetUrl?: string } }>) => Promise<{ requestsFinished: number; requestsFailed: number }>;
   teardown: () => Promise<void>;
   consumeTerminalError: () => Error | null;
-}
-
-interface ApolloRequestCapture {
-  headers: Record<string, string>;
-  method: string;
-  postDataJson: unknown;
-  requestUrl: string;
-  responsePath: string;
-  displayMode: string | null;
 }
 
 interface ApolloPeopleApiResponse {
@@ -48,7 +46,15 @@ const PEOPLE_RESPONSE_TIMEOUT_MS = 180_000;
 const APOLLO_SETTLE_TIMEOUT_MS = 10_000;
 const INLINE_CHALLENGE_ATTEMPTS = 2;
 const PRE_SEARCH_HUMAN_DELAY_MS = 7_000;
+const TRUST_WARMUP_MIN_MS = 60_000;
+const TRUST_WARMUP_MAX_MS = 120_000;
+const TRUST_WARMUP_IDLE_MIN_MS = 10_000;
+const TRUST_WARMUP_IDLE_MAX_MS = 20_000;
 const APOLLO_PEOPLE_BASE_URL = 'https://app.apollo.io/#/people';
+const APOLLO_TRUST_WARMUP_ROUTES = [
+  'https://app.apollo.io/#/onboarding-hub/queue',
+  'https://app.apollo.io/#/home',
+] as const;
 const APOLLO_PEOPLE_SEARCH_FIELDS = [
   'contact.id',
   'contact.name',
@@ -149,13 +155,6 @@ export function detectChallengeTypeFromText(text: string): { challengeType: stri
   }
 
   if (
-    normalized.includes('recaptcha')
-    || normalized.includes('g-recaptcha')
-  ) {
-    return { challengeType: 'recaptcha', challengeSitekey };
-  }
-
-  if (
     normalized.includes('access denied')
     || normalized.includes('forbidden')
     || normalized.includes('too many requests')
@@ -176,6 +175,7 @@ function buildResponseMeta(
   bodyText: string,
   challengeSitekey?: string | null,
   challengeSource: ApolloResponseMeta['challengeSource'] = null,
+  requestCapture?: ApolloRequestCapture,
 ): ApolloResponseMeta {
   return {
     responseUrl,
@@ -184,6 +184,7 @@ function buildResponseMeta(
     bodyPreview: bodyText.slice(0, 500),
     challengeSitekey,
     challengeSource,
+    requestCapture,
   };
 }
 
@@ -233,6 +234,10 @@ function randomAlphaNumeric(length: number): string {
   }
 
   return result;
+}
+
+function randomInt(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
 export function getApolloDisplayMode(payload: unknown): string | null {
@@ -312,7 +317,23 @@ export function buildReplayHeaders(
     'x-referer-path': headers['x-referer-path'] || '/people',
   };
 
-  for (const headerName of ['baggage', 'sentry-trace', 'x-cf-widget-type']) {
+  for (const headerName of [
+    'baggage',
+    'origin',
+    'priority',
+    'referer',
+    'sec-ch-ua',
+    'sec-ch-ua-mobile',
+    'sec-ch-ua-platform',
+    'sec-fetch-dest',
+    'sec-fetch-mode',
+    'sec-fetch-site',
+    'sec-gpc',
+    'sentry-trace',
+    'user-agent',
+    'x-cf-turnstile-response',
+    'x-cf-widget-type',
+  ]) {
     const value = headers[headerName];
     if (value) {
       replayHeaders[headerName] = value;
@@ -338,10 +359,92 @@ async function captureDebugScreenshot(page: Page, jobId: string, suffix: string)
   }
 }
 
-async function navigateToTarget(page: Page, jobId: string, targetUrl: string): Promise<void> {
+async function openFreshApolloPage(context: BrowserContext, jobId: string): Promise<Page> {
+  const existingPages = context.pages();
+  if (existingPages.length === 0) {
+    return context.newPage();
+  }
+
+  logger.info(
+    { jobId, restoredPageCount: existingPages.length, restoredUrls: existingPages.map(page => page.url()) },
+    'Closing restored persistent-context pages before starting fresh Apollo run',
+  );
+
+  await Promise.allSettled(
+    existingPages.map(page => page.close().catch(() => undefined)),
+  );
+
+  return context.newPage();
+}
+
+type PageLike = Pick<Page, 'isClosed' | 'url'>;
+
+export function pickActiveApolloPage<T extends PageLike>(preferredPage: T | null, pages: T[]): T | null {
+  if (preferredPage && !preferredPage.isClosed()) {
+    return preferredPage;
+  }
+
+  return pages.find(page => !page.isClosed() && page.url().includes('app.apollo.io'))
+    ?? pages.find(page => !page.isClosed())
+    ?? null;
+}
+
+async function resolveActiveApolloPage(
+  context: BrowserContext,
+  page: Page,
+  jobId: string,
+  phase: string,
+  waitMs = 5_000,
+): Promise<Page> {
+  const existingPage = pickActiveApolloPage(page, context.pages());
+  if (existingPage) {
+    if (existingPage !== page) {
+      attachPageDiagnostics(existingPage, jobId);
+      logger.warn(
+        {
+          jobId,
+          phase,
+          previousPageClosed: page.isClosed(),
+          recoveredUrl: safePageUrl(existingPage),
+        },
+        'Recovered active Apollo page handle after page replacement',
+      );
+    }
+
+    return existingPage;
+  }
+
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 250));
+    const nextPage = pickActiveApolloPage(null, context.pages());
+    if (nextPage) {
+      attachPageDiagnostics(nextPage, jobId);
+      logger.warn(
+        {
+          jobId,
+          phase,
+          recoveredUrl: safePageUrl(nextPage),
+        },
+        'Recovered newly opened Apollo page after page closure',
+      );
+      return nextPage;
+    }
+  }
+
+  throw new Error(`Apollo page was closed during ${phase} and no replacement page was found`);
+}
+
+async function navigateToTarget(
+  context: BrowserContext,
+  initialPage: Page,
+  jobId: string,
+  targetUrl: string,
+): Promise<Page> {
   const target = new URL(targetUrl);
   const targetHash = target.hash || '#/people';
   const targetHref = target.toString();
+  let page = await resolveActiveApolloPage(context, initialPage, jobId, 'people navigation start');
 
   logger.info({ jobId, currentUrl: page.url(), targetHash, targetHref }, 'Navigating Apollo app to people route');
 
@@ -353,29 +456,144 @@ async function navigateToTarget(page: Page, jobId: string, targetUrl: string): P
     throw new Error('Apollo redirected back to login after authentication');
   }
 
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      try {
+        await page.goto(targetHref, {
+          waitUntil: 'domcontentloaded',
+          timeout: 120_000,
+        });
+      } catch (err) {
+        logger.warn(
+          { jobId, currentUrl: safePageUrl(page), targetHref, err: err instanceof Error ? err.message : String(err), attempt },
+          'Direct Apollo route navigation failed, falling back to hash mutation',
+        );
+
+        page = await resolveActiveApolloPage(context, page, jobId, 'people hash fallback');
+        await page.evaluate(mutateHashScript, targetHash);
+      }
+
+      await page.waitForFunction(
+        "window.location.hash.startsWith('#/people') || window.location.pathname === '/people'",
+        undefined,
+        { timeout: 60_000 },
+      );
+
+      await page.waitForLoadState('networkidle', { timeout: APOLLO_SETTLE_TIMEOUT_MS }).catch(() => undefined);
+      await page.waitForTimeout(2_000);
+      logger.info({ jobId, currentUrl: page.url(), targetHash, targetHref }, 'Apollo people route requested');
+      return page;
+    } catch (err) {
+      if (attempt >= 2 || !isTargetClosedError(err)) {
+        throw err;
+      }
+
+      page = await resolveActiveApolloPage(context, page, jobId, 'people navigation retry');
+    }
+  }
+
+  return page;
+}
+
+async function navigateWithinApollo(
+  context: BrowserContext,
+  initialPage: Page,
+  jobId: string,
+  targetUrl: string,
+  phase: string,
+): Promise<Page> {
+  let page = await resolveActiveApolloPage(context, initialPage, jobId, `${phase} start`);
+  logger.info({ jobId, phase, currentUrl: page.url(), targetUrl }, 'Navigating Apollo app during trust warmup');
+
   try {
-    await page.goto(targetHref, {
+    await page.goto(targetUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 120_000,
     });
   } catch (err) {
     logger.warn(
-      { jobId, currentUrl: page.url(), targetHref, err: err instanceof Error ? err.message : String(err) },
-      'Direct Apollo route navigation failed, falling back to hash mutation',
+      { jobId, phase, currentUrl: page.url(), targetUrl, err: err instanceof Error ? err.message : String(err) },
+      'Apollo trust warmup navigation failed, continuing with current page',
     );
-
-    await page.evaluate(mutateHashScript, targetHash);
   }
 
-  await page.waitForFunction(
-    "window.location.hash.startsWith('#/people') || window.location.pathname === '/people'",
-    undefined,
-    { timeout: 60_000 },
+  await page.waitForLoadState('networkidle', { timeout: APOLLO_SETTLE_TIMEOUT_MS }).catch(() => undefined);
+  await page.waitForTimeout(randomInt(1_500, 3_000)).catch(() => undefined);
+  return page;
+}
+
+async function performApolloTrustWarmupActivity(page: Page): Promise<void> {
+  const viewport = page.viewportSize() ?? { width: 1440, height: 960 };
+  const moves = Array.from({ length: 4 }, () => ({
+    x: randomInt(Math.round(viewport.width * 0.18), Math.round(viewport.width * 0.82)),
+    y: randomInt(Math.round(viewport.height * 0.18), Math.round(viewport.height * 0.82)),
+    steps: randomInt(12, 28),
+  }));
+
+  for (const move of moves) {
+    await page.mouse.move(move.x, move.y, { steps: move.steps }).catch(() => undefined);
+    await page.waitForTimeout(randomInt(400, 1_100)).catch(() => undefined);
+  }
+
+  await safePageEvaluate(page, () => {
+    window.scrollTo({ top: Math.min(window.innerHeight * 0.65, 540), behavior: 'instant' });
+  });
+  await page.waitForTimeout(randomInt(900, 1_800)).catch(() => undefined);
+
+  await safePageEvaluate(page, () => {
+    const interactiveTargets = Array.from(document.querySelectorAll('button, a, [role="button"]')) as HTMLElement[];
+    const target = interactiveTargets.find(element => {
+      const rect = element.getBoundingClientRect();
+      return rect.width > 20 && rect.height > 20;
+    });
+    target?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+  });
+  await page.waitForTimeout(randomInt(700, 1_600)).catch(() => undefined);
+
+  await safePageEvaluate(page, () => {
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  });
+}
+
+async function runApolloTrustWarmup(context: BrowserContext, initialPage: Page, jobId: string): Promise<Page> {
+  const totalDurationMs = randomInt(TRUST_WARMUP_MIN_MS, TRUST_WARMUP_MAX_MS);
+  const startedAt = Date.now();
+  let routeIndex = 0;
+  let page = initialPage;
+
+  logger.info(
+    { jobId, totalDurationMs, routes: APOLLO_TRUST_WARMUP_ROUTES },
+    'Starting Apollo trust warmup before people navigation',
   );
 
-  await page.waitForLoadState('networkidle', { timeout: APOLLO_SETTLE_TIMEOUT_MS }).catch(() => undefined);
-  await page.waitForTimeout(2_000);
-  logger.info({ jobId, currentUrl: page.url(), targetHash, targetHref }, 'Apollo people route requested');
+  while (Date.now() - startedAt < totalDurationMs) {
+    const targetUrl = APOLLO_TRUST_WARMUP_ROUTES[routeIndex % APOLLO_TRUST_WARMUP_ROUTES.length] ?? APOLLO_TRUST_WARMUP_ROUTES[0];
+    routeIndex += 1;
+
+    if (!areApolloRoutesEquivalent(page.url(), targetUrl)) {
+      page = await navigateWithinApollo(context, page, jobId, targetUrl, 'trust-warmup');
+    }
+
+    await performApolloTrustWarmupActivity(page);
+
+    const remainingMs = totalDurationMs - (Date.now() - startedAt);
+    if (remainingMs <= 0) {
+      break;
+    }
+
+    const idleMs = Math.min(remainingMs, randomInt(TRUST_WARMUP_IDLE_MIN_MS, TRUST_WARMUP_IDLE_MAX_MS));
+    logger.info(
+      { jobId, currentUrl: page.url(), idleMs, remainingMs: Math.max(0, remainingMs - idleMs) },
+      'Idling on Apollo page to build session trust',
+    );
+    await page.waitForTimeout(idleMs).catch(() => undefined);
+  }
+
+  logger.info(
+    { jobId, elapsedMs: Date.now() - startedAt, currentUrl: page.url() },
+    'Apollo trust warmup completed',
+  );
+  return page;
 }
 
 function isSearchUrl(targetUrl: string): boolean {
@@ -383,7 +601,6 @@ function isSearchUrl(targetUrl: string): boolean {
 }
 
 async function preparePeopleRouteForSearch(page: Page, jobId: string): Promise<void> {
-  await navigateToTarget(page, jobId, APOLLO_PEOPLE_BASE_URL);
   logger.info({ jobId, delayMs: PRE_SEARCH_HUMAN_DELAY_MS }, 'Running pre-search human activity on Apollo people page');
 
   const stepDelayMs = Math.floor(PRE_SEARCH_HUMAN_DELAY_MS / 5);
@@ -404,44 +621,106 @@ async function preparePeopleRouteForSearch(page: Page, jobId: string): Promise<v
   }
 }
 
+function areApolloRoutesEquivalent(currentUrl: string, targetUrl: string): boolean {
+  try {
+    const current = new URL(currentUrl);
+    const target = new URL(targetUrl);
+    return `${current.pathname}${current.hash}` === `${target.pathname}${target.hash}`;
+  } catch {
+    return currentUrl === targetUrl;
+  }
+}
+
 async function materializePageLevelChallenge(
+  context: BrowserContext,
   page: Page,
   jobId: string,
   challengeType: string | null,
-): Promise<ChallengeDetection | null> {
+): Promise<{ page: Page; detection: ChallengeDetection | null }> {
+  let currentPage = page;
   for (let attempt = 1; attempt <= INLINE_CHALLENGE_ATTEMPTS; attempt += 1) {
     logger.warn(
       { jobId, challengeType, attempt, maxAttempts: INLINE_CHALLENGE_ATTEMPTS },
       'API challenge detected; retrying via top-level people route to materialize page-level challenge',
     );
-    await navigateToTarget(page, jobId, APOLLO_PEOPLE_BASE_URL);
-    await page.waitForTimeout(3_000).catch(() => undefined);
-    const detection = await detectChallenge(page);
+    currentPage = await navigateToTarget(context, currentPage, jobId, APOLLO_PEOPLE_BASE_URL);
+    await currentPage.waitForTimeout(3_000).catch(() => undefined);
+    const detection = await detectChallenge(currentPage);
     if (detection.type !== null) {
-      return detection;
+      return { page: currentPage, detection };
     }
   }
 
-  return null;
+  return { page: currentPage, detection: null };
 }
 
-async function waitForApolloPeoplePayload(page: Page, jobId: string): Promise<ApolloPeopleApiResponse> {
+function waitForCanonicalPeopleResponse(
+  context: BrowserContext,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<import('playwright').Response> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Apollo people search response not observed within ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const cleanup = (): void => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeoutId);
+      context.off('response', handleResponse);
+      signal?.removeEventListener('abort', handleAbort);
+    };
+
+    const handleAbort = (): void => {
+      cleanup();
+      reject(new Error('aborted'));
+    };
+
+    const handleResponse = (candidate: import('playwright').Response): void => {
+      if (candidate.request().method() !== 'POST' || !candidate.url().includes('/api/v1/mixed_people/search')) {
+        return;
+      }
+
+      const requestPayload = parseRequestJson(candidate.request());
+      const responsePath = extractResponsePath(candidate.url());
+      if (!isCanonicalPeopleSearchCapture(responsePath, requestPayload)) {
+        return;
+      }
+
+      cleanup();
+      resolve(candidate);
+    };
+
+    if (signal?.aborted) {
+      handleAbort();
+      return;
+    }
+
+    context.on('response', handleResponse);
+    signal?.addEventListener('abort', handleAbort, { once: true });
+  });
+}
+
+async function waitForApolloPeoplePayload(
+  context: BrowserContext,
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<ApolloPeopleApiResponse> {
   const deadline = Date.now() + PEOPLE_RESPONSE_TIMEOUT_MS;
 
   while (Date.now() < deadline) {
-    const remainingMs = deadline - Date.now();
-    const response = await page.waitForResponse(
-      candidate => {
-        if (candidate.request().method() !== 'POST' || !candidate.url().includes('/api/v1/mixed_people/search')) {
-          return false;
-        }
+    if (signal?.aborted) {
+      throw new Error('aborted');
+    }
 
-        const requestPayload = parseRequestJson(candidate.request());
-        const responsePath = extractResponsePath(candidate.url());
-        return isCanonicalPeopleSearchCapture(responsePath, requestPayload);
-      },
-      { timeout: remainingMs },
-    );
+    const remainingMs = deadline - Date.now();
+    const response = await waitForCanonicalPeopleResponse(context, remainingMs, signal);
 
     const request = response.request();
     const responsePath = extractResponsePath(response.url());
@@ -452,6 +731,8 @@ async function waitForApolloPeoplePayload(page: Page, jobId: string): Promise<Ap
       requestUrl: request.url(),
       responsePath,
       displayMode: getApolloDisplayMode(parseRequestJson(request)),
+      hasTurnstileResponseHeader: typeof request.headers()['x-cf-turnstile-response'] === 'string'
+        && request.headers()['x-cf-turnstile-response'].trim().length > 0,
     };
 
     logger.info(
@@ -460,6 +741,7 @@ async function waitForApolloPeoplePayload(page: Page, jobId: string): Promise<Ap
         responsePath,
         displayMode: requestCapture.displayMode,
         canonicalPeopleSearch: isCanonicalPeopleSearchCapture(responsePath, requestCapture.postDataJson),
+        hasTurnstileResponseHeader: requestCapture.hasTurnstileResponseHeader,
       },
       'Captured Apollo people search candidate',
     );
@@ -474,6 +756,7 @@ async function waitForApolloPeoplePayload(page: Page, jobId: string): Promise<Ap
       bodyText,
       challengeSitekey,
       challengeType ? 'api_response' : null,
+      requestCapture,
     );
 
     if (!contentType.includes('application/json')) {
@@ -504,11 +787,7 @@ async function waitForApolloPeoplePayload(page: Page, jobId: string): Promise<Ap
 
     let payload: unknown;
     try {
-      const rawResponse = JSON.parse(bodyText) as unknown;
-      console.log('raw keys:', Object.keys((rawResponse && typeof rawResponse === 'object' && !Array.isArray(rawResponse))
-        ? rawResponse as Record<string, unknown>
-        : {}));
-      payload = rawResponse;
+      payload = JSON.parse(bodyText) as unknown;
     } catch (err) {
       logger.warn(
         {
@@ -540,7 +819,7 @@ async function waitForApolloPeoplePayload(page: Page, jobId: string): Promise<Ap
 }
 
 export async function createCrawler(deps: CrawlerDeps): Promise<ManagedCrawler> {
-  const { jobId, launchAttempt = 1, onChallengeDetected, onPeopleResponse } = deps;
+  const { jobId, launchAttempt = 1, forceFreshProfile = false, onChallengeDetected, onPeopleResponse } = deps;
   let browserContext: BrowserContext | null = null;
   let terminalError: Error | null = null;
   return {
@@ -555,15 +834,19 @@ export async function createCrawler(deps: CrawlerDeps): Promise<ManagedCrawler> 
           ? firstRequest.userData.targetUrl
           : String(firstRequest.url);
 
-        browserContext = await launchApolloContext(jobId);
-        const page = browserContext.pages()[0] ?? await browserContext.newPage();
+        browserContext = await launchApolloContext(jobId, {
+          forceFreshProfile,
+          includeCloudflareSeedCookies: forceFreshProfile ? false : undefined,
+        });
+        let page = await openFreshApolloPage(browserContext, jobId);
 
         attachPageDiagnostics(page, jobId);
         page.setDefaultNavigationTimeout(120_000);
         page.setDefaultTimeout(120_000);
         await configureApolloPage(page);
         await AuthManager.ensureAuthenticated(page, jobId);
-        await navigateToTarget(page, jobId, APOLLO_PEOPLE_BASE_URL);
+        page = await runApolloTrustWarmup(browserContext, page, jobId);
+        page = await navigateToTarget(browserContext, page, jobId, APOLLO_PEOPLE_BASE_URL);
         const warmup = await warmupApolloSession(page, jobId);
         const sessionPreflight = await runApolloSessionPreflight(page);
         logger.info({ jobId, launchAttempt, warmup, sessionPreflight }, 'Apollo session preflight completed');
@@ -582,14 +865,28 @@ export async function createCrawler(deps: CrawlerDeps): Promise<ManagedCrawler> 
         }
 
         while (true) {
-          const peopleResponsePromise: Promise<ApolloPeopleApiResult> = waitForApolloPeoplePayload(page, jobId)
+          page = await resolveActiveApolloPage(browserContext, page, jobId, 'people search loop');
+          const attemptAbortController = new AbortController();
+          const peopleResponsePromise: Promise<ApolloPeopleApiResult> = waitForApolloPeoplePayload(
+            browserContext,
+            jobId,
+            attemptAbortController.signal,
+          )
             .then<ApolloPeopleApiResult>(value => ({ ok: true, value }))
             .catch<ApolloPeopleApiResult>(error => ({ ok: false, error }));
           logger.info(
             { jobId, launchAttempt, targetUrl, msSinceWarmupCompleted: Date.now() - warmupCompletedAt },
             'Triggering Apollo people search',
           );
-          await navigateToTarget(page, jobId, targetUrl);
+
+          if (!areApolloRoutesEquivalent(page.url(), targetUrl)) {
+            page = await navigateToTarget(browserContext, page, jobId, targetUrl);
+          } else {
+            logger.info(
+              { jobId, launchAttempt, currentUrl: page.url(), targetUrl },
+              'Apollo search route already active; skipping redundant re-navigation',
+            );
+          }
 
           const domDetection = await detectChallenge(page);
           if (domDetection.type !== null) {
@@ -598,10 +895,8 @@ export async function createCrawler(deps: CrawlerDeps): Promise<ManagedCrawler> 
               await result;
             }
 
-            if (
-              (domDetection.type === 'recaptcha' || domDetection.type === 'turnstile')
-              && inlineChallengeAttempts < INLINE_CHALLENGE_ATTEMPTS
-            ) {
+            if (domDetection.type === 'turnstile' && inlineChallengeAttempts < INLINE_CHALLENGE_ATTEMPTS) {
+              attemptAbortController.abort();
               inlineChallengeAttempts += 1;
               await page.waitForTimeout(3_000);
               continue;
@@ -629,17 +924,18 @@ export async function createCrawler(deps: CrawlerDeps): Promise<ManagedCrawler> 
           } catch (err) {
             if (
               err instanceof ApolloResponseError
-              && (err.challengeType === 'turnstile' || err.challengeType === 'recaptcha' || err.challengeType === 'cloudflare')
+              && (err.challengeType === 'turnstile' || err.challengeType === 'cloudflare')
               && inlineChallengeAttempts < INLINE_CHALLENGE_ATTEMPTS
             ) {
               inlineChallengeAttempts += 1;
               if (err.challengeSource === 'api_response') {
-                const pageLevelDetection = await materializePageLevelChallenge(page, jobId, err.challengeType);
-                if (pageLevelDetection) {
+                const materialized = await materializePageLevelChallenge(browserContext, page, jobId, err.challengeType);
+                page = materialized.page;
+                if (materialized.detection) {
                   const result = onChallengeDetected?.(
                     {
-                      ...pageLevelDetection,
-                      sitekey: pageLevelDetection.sitekey ?? err.responseMeta.challengeSitekey ?? null,
+                      ...materialized.detection,
+                      sitekey: materialized.detection.sitekey ?? err.responseMeta.challengeSitekey ?? null,
                       source: 'page_dom',
                     },
                     safePageUrl(page) ?? err.responseMeta.responseUrl,
@@ -648,12 +944,18 @@ export async function createCrawler(deps: CrawlerDeps): Promise<ManagedCrawler> 
                   if (result instanceof Promise) {
                     await result;
                   }
+                  attemptAbortController.abort();
                   await page.waitForTimeout(3_000);
                   continue;
                 }
+
+                throw new EnvironmentTrustError(
+                  `API challenge detected for ${err.responseMeta.responseUrl} but page-level challenge did not materialize`,
+                  'api_challenge_not_materialized',
+                );
               } else {
                 const responseDetection: ChallengeDetection = {
-                  type: err.challengeType,
+                  type: err.challengeType === 'turnstile' ? 'turnstile' : 'cloudflare',
                   sitekey: err.responseMeta.challengeSitekey ?? null,
                   message: `Challenge detected in Apollo API response: ${err.challengeType}`,
                   source: 'api_response',
@@ -662,6 +964,7 @@ export async function createCrawler(deps: CrawlerDeps): Promise<ManagedCrawler> 
                 if (result instanceof Promise) {
                   await result;
                 }
+                attemptAbortController.abort();
                 await page.waitForTimeout(3_000);
                 continue;
               }
@@ -679,6 +982,8 @@ export async function createCrawler(deps: CrawlerDeps): Promise<ManagedCrawler> 
               'Failed while waiting for Apollo people search response',
             );
             throw err;
+          } finally {
+            attemptAbortController.abort();
           }
         }
       } catch (err) {
