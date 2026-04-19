@@ -6,7 +6,6 @@ import {
   installAutomationMaskScript,
 } from './browser-context';
 import { getApolloBrowserConfig } from './browser-config';
-import { getEnv } from './env/schema';
 
 function normalizeApolloLocale(locale: string | undefined): string {
   const trimmed = (locale ?? '').trim();
@@ -17,12 +16,12 @@ function normalizeApolloLocale(locale: string | undefined): string {
   return trimmed.split(/[-_]/)[0]?.toLowerCase() || 'en';
 }
 
-export function getApolloLoginUrl(locale = getEnv().BROWSER_LOCALE): string {
+export function getApolloLoginUrl(locale = process.env.BROWSER_LOCALE): string {
   const apolloLocale = normalizeApolloLocale(locale);
   return `https://app.apollo.io/#/login?locale=${encodeURIComponent(apolloLocale)}`;
 }
 
-export const APOLLO_LOGIN_URL = getApolloLoginUrl();
+export const APOLLO_LOGIN_URL = getApolloLoginUrl(process.env.BROWSER_LOCALE);
 
 export const APOLLO_PROXY_BYPASS_LIST = [
   '*.microsoftonline.com',

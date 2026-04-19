@@ -1,7 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import type { Row } from '@fast-csv/format';
-import { mkdir } from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
+import { mkdir, readFile } from 'node:fs/promises';
 import { format } from 'node:path';
 import { once } from 'node:events';
 import filenamify from 'filenamify';
@@ -58,23 +57,16 @@ async function writeCsv(prisma: PrismaClient, jobId: string, timestampStr: strin
   const leads = await fetchLeads(prisma, jobId);
   const rows: Row[] = leads.map(buildExportRow);
 
-  await writeToPath(filePath, rows, { headers: [...EXPORT_COLUMN_KEYS] });
+  const csvStream = writeToPath(filePath, rows, { headers: [...EXPORT_COLUMN_KEYS] });
+  await Promise.race([
+    once(csvStream, 'finish'),
+    once(csvStream, 'error').then(([error]) => Promise.reject(error)),
+  ]);
   return filePath;
 }
 
 export async function readCsvHeaders(filePath: string): Promise<string[]> {
-  const stream = createReadStream(filePath, { encoding: 'utf8' });
-  let buffer = '';
-
-  stream.on('data', chunk => {
-    buffer += chunk;
-    const newlineIndex = buffer.indexOf('\n');
-    if (newlineIndex !== -1) {
-      stream.destroy();
-    }
-  });
-
-  await once(stream, 'close');
+  const buffer = await readFile(filePath, 'utf8');
   const firstLine = buffer.split(/\r?\n/, 1)[0] ?? '';
   return firstLine.split(',').map(header => header.trim()).filter(Boolean);
 }
