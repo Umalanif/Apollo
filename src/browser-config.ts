@@ -1,5 +1,3 @@
-import { getEnv } from './env/schema';
-
 export type ApolloBrowserName = 'edge' | 'chrome' | 'chromium';
 
 export interface ApolloBrowserConfig {
@@ -8,6 +6,18 @@ export interface ApolloBrowserConfig {
   launchLabel: string;
   locale: string;
   timezoneId?: string;
+}
+
+function getOptionalBrowserEnv(): {
+  browser?: string;
+  locale?: string;
+  timezoneId?: string;
+} {
+  return {
+    browser: process.env.APOLLO_BROWSER,
+    locale: process.env.BROWSER_LOCALE,
+    timezoneId: process.env.BROWSER_TIMEZONE_ID,
+  };
 }
 
 function normalizeBrowserName(value: string | undefined): ApolloBrowserName {
@@ -24,16 +34,16 @@ function normalizeBrowserName(value: string | undefined): ApolloBrowserName {
 }
 
 export function getApolloBrowserConfig(): ApolloBrowserConfig {
-  const env = getEnv();
-  const name = normalizeBrowserName(env.APOLLO_BROWSER);
+  const env = getOptionalBrowserEnv();
+  const name = normalizeBrowserName(env.browser);
 
   if (name === 'chrome') {
     return {
       name,
       channel: 'chrome',
       launchLabel: 'Google Chrome',
-      locale: env.BROWSER_LOCALE ?? 'en-US',
-      timezoneId: env.BROWSER_TIMEZONE_ID,
+      locale: env.locale ?? 'en-US',
+      timezoneId: env.timezoneId,
     };
   }
 
@@ -41,8 +51,8 @@ export function getApolloBrowserConfig(): ApolloBrowserConfig {
     return {
       name,
       launchLabel: 'Chromium',
-      locale: env.BROWSER_LOCALE ?? 'en-US',
-      timezoneId: env.BROWSER_TIMEZONE_ID,
+      locale: env.locale ?? 'en-US',
+      timezoneId: env.timezoneId,
     };
   }
 
@@ -50,7 +60,7 @@ export function getApolloBrowserConfig(): ApolloBrowserConfig {
     name: 'edge',
     channel: 'msedge',
     launchLabel: 'Microsoft Edge',
-    locale: env.BROWSER_LOCALE ?? 'en-US',
-    timezoneId: env.BROWSER_TIMEZONE_ID,
+    locale: env.locale ?? 'en-US',
+    timezoneId: env.timezoneId,
   };
 }

@@ -13,6 +13,10 @@ export interface LaunchApolloContextOptions {
   includeCloudflareSeedCookies?: boolean;
 }
 
+function getReuseProfileFlag(): boolean {
+  return process.env.APOLLO_REUSE_PROFILE?.trim().toLowerCase() === 'true';
+}
+
 function sanitizeProfileSegment(value: string): string {
   return value
     .trim()
@@ -43,7 +47,7 @@ function resolveLaunchProfileId(reuseProfile: boolean, jobId: string, options: L
 
 export function resolveProfileDir(jobId: string, options: LaunchApolloContextOptions = {}): string {
   const browserConfig = getApolloBrowserConfig();
-  const reuseProfile = (getEnv().APOLLO_REUSE_PROFILE ?? false) && options.forceFreshProfile !== true;
+  const reuseProfile = getReuseProfileFlag() && options.forceFreshProfile !== true;
   const profileId = resolveLaunchProfileId(reuseProfile, jobId, options);
   return path.resolve('storage', `${browserConfig.name}-profile`, profileId);
 }
