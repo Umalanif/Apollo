@@ -1,214 +1,120 @@
-# Apollo Scraper
+# Apollo Scraper — production lead-generation automation for Apollo.io workflows.
 
-Production-oriented Apollo.io lead generation automation built with TypeScript, Playwright, Prisma, and a hardened trust-diagnostics workflow.
+[Features](#features) · [Tech Stack](#tech-stack) · [Quick Start](#quick-start) · [Environment Variables](#environment-variables)
 
-## Overview
-
-This repository packages a real-world Apollo scraping pipeline rather than a demo script. The project focuses on three areas that matter in production:
-
-- deterministic lead-search execution through a CLI worker
-- browser trust diagnostics for Cloudflare, PAT, session, and locale/timezone alignment
-- structured logging and artifacts for failure analysis
-
-The default runtime path is a single-run worker job. A Fastify/Bree API is also included for orchestration scenarios, but the primary deployment target is a worker-first container.
+│ TypeScript scraping pipeline with Playwright, Crawlee, Prisma, Docker, and trust-diagnostics tooling.
 
 ## Features
 
-- Type-safe targeting schema validated with `zod`
-- CLI worker for reproducible lead collection jobs
-- Microsoft OAuth and Apollo session handling
-- Cloudflare and Turnstile challenge detection
-- Prisma-backed persistence and export pipeline
-- Trust-debug tooling to separate IP, session, and application-level failures
-- Docker packaging with automatic worker startup
-- GitHub Actions CI for build, test, and image validation
+- Runs reproducible lead collection jobs through a CLI worker.
+- Supports Apollo and Microsoft login flows with session reuse.
+- Detects Cloudflare, Turnstile, and trust-environment failures.
+- Persists leads and runtime artifacts with Prisma-backed storage.
+- Exports diagnostics, screenshots, and structured logs for debugging.
+
+## Tech Stack
+
+```text
+┌────────────┬──────────────────────────────────────────────┐
+│ Layer      │ Technology                                   │
+├────────────┼──────────────────────────────────────────────┤
+│ Runtime    │ Node.js 20 / TypeScript                     │
+├────────────┼──────────────────────────────────────────────┤
+│ Scraping   │ Playwright / Crawlee                        │
+├────────────┼──────────────────────────────────────────────┤
+│ API        │ Fastify                                     │
+├────────────┼──────────────────────────────────────────────┤
+│ Scheduling │ Bree                                         │
+├────────────┼──────────────────────────────────────────────┤
+│ Database   │ Prisma ORM / SQLite                         │
+├────────────┼──────────────────────────────────────────────┤
+│ Validation │ Zod / zod-to-json-schema                    │
+├────────────┼──────────────────────────────────────────────┤
+│ Logging    │ Pino                                         │
+├────────────┼──────────────────────────────────────────────┤
+│ Infra      │ Docker / GitHub Actions                     │
+└────────────┴──────────────────────────────────────────────┘
+```
+
+## Quick Start
+
+```bash
+git clone https://github.com/Umalanif/Apollo.git
+cd Apollo
+cp .env.example .env
+npm ci
+npx prisma generate
+npm run build
+npm run worker -- --targeting-file examples/targeting.example.json --max-leads 10 --job-id local-demo
+```
+
+## Environment Variables
+
+```text
+┌─────────────────────────┬──────────────────────────────────────────────────────┬──────────┐
+│ Variable                │ Description                                          │ Required │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ DATABASE_URL            │ Prisma database path                                 │ No       │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ PROXY_HOST              │ Proxy host                                           │ Yes      │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ PROXY_USERNAME          │ Proxy username                                       │ Yes      │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ PROXY_PASSWORD          │ Proxy password                                       │ Yes      │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ PROXY_PORT              │ Proxy port                                           │ Yes      │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ TWO_CAPTCHA_API_KEY     │ 2Captcha API key                                     │ Yes      │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ APOLLO_EMAIL            │ Apollo account email                                 │ Cond.    │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ APOLLO_PASSWORD         │ Apollo account password                              │ Cond.    │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ APOLLO_MS_EMAIL         │ Microsoft OAuth email                                │ Cond.    │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ APOLLO_MS_PASSWORD      │ Microsoft OAuth password                             │ Cond.    │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ APOLLO_BROWSER          │ Browser channel, default `edge`                      │ No       │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ BROWSER_LOCALE          │ Browser locale                                       │ No       │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ BROWSER_TIMEZONE_ID     │ Browser timezone for trust alignment                 │ No       │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ APOLLO_REUSE_PROFILE    │ Reuse browser profile between runs                   │ No       │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ APOLLO_COOKIE_SEED_PATH │ Optional cookie seed file                            │ No       │
+├─────────────────────────┼──────────────────────────────────────────────────────┼──────────┤
+│ APOLLO_TRUST_COOLDOWN_MS│ Cooldown between trust retries                       │ No       │
+└─────────────────────────┴──────────────────────────────────────────────────────┴──────────┘
+```
+
+`Cond.` means you need either the Apollo credentials pair or the Microsoft OAuth pair.
 
 ## Project Structure
 
 ```text
 src/
-  worker-cli.ts         CLI entrypoint for single-run jobs
-  worker.ts             Main worker flow
-  debug-trust.ts        Environment trust diagnostics
-  server.ts             Optional Fastify/Bree orchestration API
+  api/
+  crawler/
+  db/
+  env/
+  services/
+  worker/
+  debug-trust.ts
+  index.ts
+  server.ts
+  worker-cli.ts
+  worker.ts
 prisma/
-  schema.prisma         SQLite schema
+  schema.prisma
 examples/
   targeting.example.json
 docker/
-  entrypoint.sh         Container startup automation
+  entrypoint.sh
+.github/workflows/
+  ci.yml
 ```
 
-## Prerequisites
+## License
 
-- Node.js 20+
-- npm 10+
-- Microsoft Edge installed for local runs
-- A working proxy
-- 2Captcha API key
-- Apollo / Microsoft credentials
-
-For containerized runs, the Docker image installs Microsoft Edge and the required system libraries automatically.
-
-## Environment Variables
-
-Copy `.env.example` to `.env` and fill in the values.
-
-Required:
-
-- `PROXY_HOST`
-- `PROXY_USERNAME`
-- `PROXY_PASSWORD`
-- `PROXY_PORT`
-- `TWO_CAPTCHA_API_KEY`
-- `APOLLO_MS_EMAIL` or `APOLLO_EMAIL`
-- `APOLLO_MS_PASSWORD` or `APOLLO_PASSWORD`
-
-Important runtime configuration:
-
-- `DATABASE_URL`
-- `APOLLO_BROWSER=edge`
-- `BROWSER_LOCALE`
-- `BROWSER_TIMEZONE_ID`
-- `APOLLO_REUSE_PROFILE`
-- `APOLLO_COOKIE_SEED_PATH`
-- `APOLLO_TRUST_COOLDOWN_MS`
-
-## Targeting Format
-
-The worker accepts targeting through inline JSON or a JSON file. Supported fields:
-
-- `keywords`
-- `titles`
-- `locations`
-- `companies`
-- `seniorities`
-- `organizationNumEmployeesRanges`
-- `organizationIndustryTagIds`
-- `organizationIndustryKeywords`
-
-Example:
-
-```json
-{
-  "titles": ["Engineer"],
-  "locations": ["United States"],
-  "organizationNumEmployeesRanges": ["51,100", "101,200"],
-  "organizationIndustryKeywords": ["computer software"]
-}
-```
-
-## Local Usage
-
-Install dependencies:
-
-```bash
-npm ci
-npx prisma generate
-```
-
-Run build and tests:
-
-```bash
-npm run build
-npm test
-```
-
-Run trust diagnostics:
-
-```bash
-npm run debug:trust
-```
-
-Run a worker job:
-
-```bash
-npm run worker -- --targeting-file examples/targeting.example.json --max-leads 10 --job-id local-demo
-```
-
-Start the optional HTTP API:
-
-```bash
-npm run build
-npm run start:server
-```
-
-## Docker Usage
-
-Build the image:
-
-```bash
-docker build -t apollo-scraper .
-```
-
-Run a worker job with a mounted targeting file:
-
-```bash
-docker run --rm \
-  --env-file .env \
-  -e TARGETING_FILE=/app/runtime/targeting.json \
-  -e JOB_ID=container-run \
-  -e MAX_LEADS=10 \
-  -v "$(pwd)/examples/targeting.example.json:/app/runtime/targeting.json:ro" \
-  -v "$(pwd)/logs:/app/logs" \
-  -v "$(pwd)/exports:/app/exports" \
-  -v "$(pwd)/storage:/app/storage" \
-  apollo-scraper
-```
-
-Or use Docker Compose:
-
-```bash
-docker compose up --build
-```
-
-Container startup behavior:
-
-1. validates required environment variables
-2. prepares runtime directories
-3. applies the Prisma schema with `prisma db push`
-4. launches the worker automatically with the provided targeting payload
-
-## Outputs and Diagnostics
-
-Runtime artifacts are written to ignored directories:
-
-- `logs/` for structured logs and diagnostic screenshots
-- `exports/` for generated lead files
-- `storage/` for browser profiles and SQLite data
-
-The trust-diagnostics workflow emits artifacts such as:
-
-- `trust-report-*.json`
-- `debug-ms-flow-*.png`
-- `*-challenge-before-solve*.json`
-- `*-challenge-after-solve*.json`
-
-## CI
-
-GitHub Actions validates the repository with:
-
-- `npm ci`
-- `prisma generate`
-- `npm run build`
-- `npm test`
-- `docker build`
-
-The CI pipeline intentionally avoids live scraping runs because those depend on private credentials, proxy reputation, and target-side risk scoring.
-
-## Operational Notes
-
-This codebase is production-grade from an engineering perspective, but successful live scraping remains environment-dependent. The main external variables are:
-
-- proxy and IP reputation
-- Microsoft account/session risk signals
-- Apollo-side challenge scoring
-- browser trust consistency across locale, timezone, and session state
-
-That boundary is expected for this class of system. The repository is designed to make those external failures diagnosable rather than opaque.
-
-## Security
-
-- Never commit `.env`, cookies, profiles, logs, or exported leads.
-- Treat proxy credentials, Microsoft credentials, and 2Captcha keys as secrets.
-- Review generated artifacts before sharing screenshots or reports externally.
+Not specified.
